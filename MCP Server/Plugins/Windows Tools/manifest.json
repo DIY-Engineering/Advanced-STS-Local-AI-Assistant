@@ -1,0 +1,15 @@
+{
+  "name": "windows_tools",
+  "version": "0.1.1 Beta",
+  "display_name": "Windows Tools",
+  "description": "System information, CLI execution, media control, health checks",
+  "author": "Nechifor Marian",
+  "enabled": true,
+  
+  "dependencies": {
+    "packages": [
+      "psutil>=7.1.0",
+      "pycaw>=20251023"
+    ]
+  }
+}

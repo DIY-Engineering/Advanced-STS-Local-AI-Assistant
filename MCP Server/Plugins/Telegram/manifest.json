@@ -1,0 +1,15 @@
+{
+  "name": "Telegram",
+  "version": "0.1.1 Beta",
+  "display_name": "Telegram",
+  "description": "Telegam messaging integration",
+  "author": "Nechifor Marian",
+  "enabled": true,
+  
+  "dependencies": {
+    "packages": [
+      ""
+    ],
+    "notes": "Requires requests (already installed for AI client)"
+  }
+}

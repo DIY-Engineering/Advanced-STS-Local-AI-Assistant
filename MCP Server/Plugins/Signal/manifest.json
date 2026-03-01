@@ -1,0 +1,15 @@
+{
+  "name": "signal",
+  "version": "0.1.1 Beta",
+  "display_name": "Signal",
+  "description": "Signal messaging integration with auto-prefixed AI Assistant messages",
+  "author": "Nechifor Marian",
+  "enabled": true,
+  
+  "dependencies": {
+    "packages": [
+      "semaphore-bot>=0.16.0"
+    ],
+    "notes": "Requires websockets and aiohttp (already installed for AI client)"
+  }
+}

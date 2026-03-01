@@ -1,0 +1,42 @@
+{
+  "server_host": "127.0.0.1",
+  "server_port": 8765,
+  "plugins": {
+    "home_assistant": {
+      "haos_url": "http://192.168.1.100:8123"
+    },
+    "windows_tools": {
+      "cli_blacklist": [
+        "format",
+        "del",
+        "rm",
+        "rmdir",
+        "rd",
+        "erase",
+        "deltree",
+        "shutdown",
+        "reboot",
+        "restart",
+        "logoff",
+        "taskkill",
+        "net",
+        "netsh",
+        "reg",
+        "regedit",
+        "diskpart",
+        "cipher",
+        "bcdedit",
+        "wmic",
+        "powercfg",
+        "schtasks",
+        "attrib"
+      ],
+      "cli_access_level": "restricted"
+    },
+    "google_services": {
+      "authenticated": false,
+      "user_email": "",
+      "user_name": ""
+    }
+  }
+}

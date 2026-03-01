@@ -1,0 +1,3867 @@
+import os
+import subprocess
+import tempfile
+import threading
+import time
+import numpy as np
+import pyaudio
+import wave
+import emoji
+import torch
+import glob
+import gc
+import requests
+import json
+from datetime import datetime
+import logging
+import contextlib
+import re
+import logging.handlers
+from faster_whisper import WhisperModel
+from TTS.api import TTS
+from TTS.utils.manage import ModelManager
+from TTS.tts.configs.xtts_config import XttsConfig  
+from TTS.tts.models.xtts import Xtts  
+import queue
+import sys
+import shutil
+import psutil
+from sentence_transformers import SentenceTransformer
+import chromadb
+from chromadb.config import Settings 
+
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QComboBox, 
+                             QPushButton, QTextEdit, QSlider, QRadioButton, QLineEdit,
+                             QGroupBox, QFileDialog, QMessageBox, QButtonGroup)
+from PyQt5.QtCore import Qt, pyqtSignal, QObject, QTimer
+from PyQt5.QtGui import QFont, QPalette, QColor, QPixmap, QPainter, QBrush, QTextCursor, QPen
+
+# Fix encoding for console
+sys.stdout.reconfigure(encoding='utf-8')
+sys.stderr.reconfigure(encoding='utf-8')
+
+# ====== FOLDER STRUCTURE ======
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+def create_folder_structure():
+    """
+    Creates all required folders at startup if they don't already exist.
+    This ensures the project structure is always intact, regardless of
+    where the script is run from or if folders were accidentally deleted.
+    """
+    folders = [
+        "Chat History",
+        "Coqui TTS",
+        os.path.join("Coqui TTS", "Models"),
+        os.path.join("Coqui TTS", "Samples"),
+        "Debug Logs",
+        "Dependencies",
+        "Graphics",
+        "MCP Server",
+        os.path.join("MCP Server", "Graphics"),
+        os.path.join("MCP Server", "Plugins"),
+        "Profiles",
+        "RAG Embedder",
+        os.path.join("RAG Embedder", "MiniLM-L6-v2"),
+        "RAG Vector Database",
+        "Silero VAD",
+        os.path.join("Silero VAD", "Models"),
+        "System Prompt",
+        "Whisper STT",
+        os.path.join("Whisper STT", "Models"),
+        os.path.join("Whisper STT", "Models", "tiny"),
+        os.path.join("Whisper STT", "Models", "base"),
+        os.path.join("Whisper STT", "Models", "small"),
+        os.path.join("Whisper STT", "Models", "medium"),
+        os.path.join("Whisper STT", "Models", "large-v3"),
+    ]
+
+    created = 0
+    for folder in folders:
+        full_path = os.path.join(BASE_DIR, folder)
+        if not os.path.exists(full_path):
+            os.makedirs(full_path, exist_ok=True)
+            created += 1
+
+    return created
+
+# Create all folders at startup
+_created = create_folder_structure()
+
+# ====== LOGGING CONFIG ======
+MCP_SERVER_DIR  = os.path.join(BASE_DIR, "MCP Server")
+MCP_SERVER_FILE = os.path.join(MCP_SERVER_DIR, "MCP Server.py")
+LOG_DIR = os.path.join(BASE_DIR, "Debug Logs")
+
+class Utf8StreamHandler(logging.StreamHandler):
+    def __init__(self, stream=None):
+        super().__init__(stream)
+        if stream is None:
+            self.stream = sys.stdout
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(os.path.join(LOG_DIR, "Debug Log.txt"), mode='w', encoding="utf-8"),
+        Utf8StreamHandler()
+    ]
+)
+
+# ====== GLOBAL CONFIG ======
+PROMPTS_DIR        = os.path.join(BASE_DIR, "System Prompt")
+HISTORY_DIR        = os.path.join(BASE_DIR, "Chat History")
+CHAT_LOG           = os.path.join(HISTORY_DIR, "Chat History.txt")
+SETTINGS_DIR       = os.path.join(BASE_DIR, "Profiles")
+COQUI_MODELS_DIR   = os.path.join(BASE_DIR, "Coqui TTS", "Models")
+COQUI_SAMPLES_DIR  = os.path.join(BASE_DIR, "Coqui TTS", "Samples")
+WHISPER_MODELS_DIR = os.path.join(BASE_DIR, "Whisper STT", "Models")
+GRAPHICS_DIR       = os.path.join(BASE_DIR, "Graphics")
+RAG_EMBEDDER_DIR   = os.path.join(BASE_DIR, "RAG Embedder", "MiniLM-L6-v2")
+RAG_DATABASE_DIR   = os.path.join(BASE_DIR, "RAG Vector Database")
+# Note: all folders above are created at startup by create_folder_structure()
+CHUNK = 512
+FORMAT = pyaudio.paInt16
+CHANNELS = 1
+RATE = 16000
+VAD_THRESHOLD = 0.2
+VAD_WINDOW_SIZE = 512
+VAD_MIN_SPEECH_DURATION = 1.0
+VAD_MIN_SILENCE_DURATION = 1.5
+
+ModelManager.models_dir = COQUI_MODELS_DIR
+logging.info(f"Folder structure initialized — {_created} new folder(s) created")
+logging.info(f"Coqui TTS models will be stored in: {COQUI_MODELS_DIR}")
+
+# ====== CSS STYLES ======
+SCROLLBAR_STYLE = """
+    QScrollBar:vertical {
+        border: none;
+        background: #191919;
+        width: 6px;
+        margin: 0px 0px 0px 0px;
+        border-radius: 3px;
+    }
+    QScrollBar::handle:vertical {
+        background: #555555;
+        min-height: 20px;
+        border-radius: 5px;
+    }
+    QScrollBar::handle:vertical:hover {
+        background: #787878;
+    }
+    QScrollBar::add-line:vertical {
+        height: 0px;
+        subcontrol-position: bottom;
+        subcontrol-origin: margin;
+    }
+    QScrollBar::sub-line:vertical {
+        height: 0px;
+        subcontrol-position: top;
+        subcontrol-origin: margin;
+    }
+    QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+        background: none;
+    }
+"""
+
+class LogEmitter(QObject):
+    log_signal = pyqtSignal(str, str)
+
+class VUMeter(QWidget):
+    """Vintage Style VU-Meter with 14 LED"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.level = 0
+        self.segment_width = 20
+        self.segment_height = 10
+        self.gap = 2
+        self.num_segments = 14
+        self.setMinimumSize(self.num_segments * (self.segment_width + self.gap), self.segment_height)
+        
+    def set_level(self, level):
+        """Set VU-Meter Level (0-14)"""
+        self.level = min(max(int(level), 0), 14)
+        self.update()
+    
+    def paintEvent(self, event):
+        """Draws VU-Meter Segments - Vintage LED Style"""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, False)  # Disable antialiasing pentru look mai crisp
+        
+        for i in range(self.num_segments):
+            x = i * (self.segment_width + self.gap)
+            
+            # Determines color based on level and position
+            if i < self.level:
+                if i < 10:
+                    color = QColor("#00FF00")  # Verde
+                elif i < 12:
+                    color = QColor("#FFFF00")  # Galben
+                else:
+                    color = QColor("#FF0000")  # Roșu
+            else:
+                color = QColor("#0A0A0A")  # Negru (off) - mai întunecat
+            
+            # Draw the segment with a solid white frame
+            painter.setPen(QPen(QColor("#FFFFFF"), 1, Qt.SolidLine))  # Cadru alb solid 1px
+            painter.setBrush(QBrush(color, Qt.SolidPattern))  # Fill solid
+            painter.drawRect(x, 0, self.segment_width, self.segment_height)
+
+class RefreshableComboBox(QComboBox):
+    """QComboBox calls refresh function when open"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.refresh_callback = None
+
+    def set_refresh_callback(self, callback):
+        self.refresh_callback = callback
+
+    def showPopup(self):
+        if self.refresh_callback:
+            # Call refresh function before opening menu
+            self.refresh_callback()
+        super().showPopup()
+
+class TextHandler(logging.Handler):
+    def __init__(self, text_widget, emitter):
+        super().__init__()
+        self.text_widget = text_widget
+        self.emitter = emitter
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            self.emitter.log_signal.emit(msg, record.levelname)
+        except Exception as e:
+            print(f"Error in TextHandler: {str(e)}")
+
+class AIAssistantGUI(QMainWindow):
+    # ===== THREAD SAFETY SIGNAL =====
+    show_warning_signal = pyqtSignal(str, str)
+
+    def __init__(self):
+        super().__init__()
+        
+        # ====== INITIALIZE GUI ======
+        self.setWindowTitle("= Advanced STS Local AI Assistant 0.1.1 Beta =")
+        self.setGeometry(0, 0, 1326, 663)
+        self.setFixedSize(1326, 663)
+        
+        # === Connect the warning signal to the safe function ===
+        self.show_warning_signal.connect(self.show_thread_safe_warning)
+
+        screen = QApplication.primaryScreen().geometry()
+        x = (screen.width() - 1326) // 2
+        y = (screen.height() - 663) // 2
+        self.move(x, y)
+        
+        self.setStyleSheet("QMainWindow { background-color: #191919; }")
+        
+        # === Variables ===
+        self.selected_mic = ""
+        self.selected_output_device = ""
+        self.selected_lm_model = ""
+        self.selected_coqui_sample = ""
+        self.volume_level = 100
+        self.mic_volume = 100
+        self.coqui_temperature = 0.7
+        self.coqui_top_p = 0.95
+        self.coqui_top_k = 50
+        self.coqui_speed = 1.0
+        self.coqui_stream_chunk_size = 200
+        self.vad_threshold = VAD_THRESHOLD
+        self.vad_min_speech_duration = VAD_MIN_SPEECH_DURATION
+        self.vad_min_silence_duration = VAD_MIN_SILENCE_DURATION
+        self.vad_device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.is_recording = False
+        self.audio_thread = None
+        self.stop_event = threading.Event()
+        self.stop_tts_flag = threading.Event()
+        self.resume_event = threading.Event()
+        self.resume_event.set()
+        self.audio_stream = None
+        self.audio_pyaudio = None
+        self.audio_data = None
+        self.whisper_language = "en" 
+        self.whisper_device = "cuda" if torch.cuda.is_available() else "cpu"  
+        self.whisper_model = "small"
+        self.faster_whisper_model = None
+        self.whisper_compute_type = "int8"  # === Set int8/float16/float32 depending on your hardware ===
+        self.current_whisper_device = self.whisper_device
+        self.current_whisper_model = None  # === Track current loaded model name ===
+        self.coqui_device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.current_tts_stream = None
+        self.chat_text = None
+        self.debug_text = None
+        self.vu_level_input = 0
+        self.vu_level_output = 0
+        self.wake_word = "Kainé"
+        self.wake_word_enabled = False
+        self.use_mcp_server = False
+        self.use_mcp_server = False
+        self.mcp_system_prompt = None     
+        self.mcp_connected = False        
+        self.mcp_server_process = None  # === Headless MCP server subprocess ===
+        self.mcp_request_id = 0           
+        self.mcp_max_iterations = 5       
+        self.real_talk_enabled = False
+        self.rag_memory_enabled = False
+        self.rag_embedder = None
+        self.rag_client = None
+        self.rag_collection = None
+        self.current_profile_name = None  # ==== None = no profile loaded => generic mode ===
+        self.current_chat_log = CHAT_LOG  # === Starts Generic ===
+        self.current_rag_dir = os.path.join(RAG_DATABASE_DIR, "Chat History")  # === Starts Generic ===
+        self.rag_queue = queue.Queue()
+        self.rag_event = threading.Event()
+        self.rag_thread = None
+        self.tts_active = False
+        self.current_whisper_model = None
+        self.current_whisper_device = self.whisper_device
+        self.current_coqui_device = self.coqui_device
+        self.current_vad_device = self.vad_device
+        self.lm_server = "http://127.0.0.1:1234"
+        self.mcp_server = "http://127.0.0.1:8765"
+        self.coqui_model = None
+        self.coqui_model_name = "tts_models/multilingual/multi-dataset/xtts_v2"
+        self.vad_model = None
+        self.chat_history = []
+        self.image_references = []
+        self.temperature = 0.7
+        self.max_tokens = 512
+        self.top_k = 40
+        self.repetition_penalty = 1.1
+        self.min_p = 0.05
+        self.top_p = 0.95
+        self.recording_paused = False
+        self.tts_lock = threading.Lock()
+        self.speaker_latents = None
+        self.tts_queue = queue.Queue()
+        self.tts_event = threading.Event()
+        self.init_silero_vad()
+        self.create_gui()
+        self.setup_debug_logging()
+        self.load_mics()
+        self.load_output_devices()
+        self.load_coqui_samples()
+        
+        # === We use Timer to not block the GUI at startup ===
+        QTimer.singleShot(500, self.load_lm_models)
+        
+        self.auto_refresh_lm_models()
+        self.load_initial_chat_history()
+        self.ensure_default_profile() # === Ensures that always is an active profile ===
+        logging.info("Starting application")
+        
+        if self.use_mcp_server:
+            QTimer.singleShot(1000, self.initialize_mcp_connection)
+
+        self.tts_thread = threading.Thread(target=self.tts_worker, daemon=True)
+        self.tts_thread.start()
+        logging.info("TTS worker thread started.")
+        self.init_rag_system()
+        self.rag_thread = threading.Thread(target=self.rag_worker, daemon=True)
+        self.rag_thread.start()
+        logging.info("RAG worker thread started.")
+
+        # === Timer for updating resources ===
+        self.resource_timer = QTimer(self)
+        self.resource_timer.timeout.connect(self.update_resources)
+        self.resource_timer.start(1000)  # Update la fiecare secundă
+
+    def show_thread_safe_warning(self, title, message):
+        """This function runs on the Main Thread and displays the message without crashing the application."""
+        QMessageBox.warning(self, title, message)
+
+    def create_gui(self):
+        # === Modified stylesheet to allow EXACT positioning of title ===
+        group_style = """
+            QGroupBox {
+                background-color: #191919;
+                border: 2px solid #FFFFFF;
+                border-radius: 10px;
+                margin-top: 15px; 
+                font-weight: bold;
+                color: #FFFFFF;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 5px;
+                color: #FFFFFF;
+                left: 10px;
+                top: 8px;
+                background-color: #191919;
+            }
+        """
+        
+        button_style = """
+            QPushButton {
+                background-color: #787878;
+                color: #FFFFFF;
+                border-radius: 10px;
+                font-weight: bold;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                background-color: #8C8C8C;
+            }
+            QPushButton:pressed {
+                background-color: #666666;
+            }
+        """
+        
+        combo_style = """
+            QComboBox {
+                background-color: #121212;
+                color: #FFFFFF;
+                border: 1px solid #FFFFFF;
+                border-radius: 5px;
+                padding: 1px 3px 3px 3px;  /* top right bottom left */
+            }
+            QComboBox::drop-down {
+                border: none;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #121212;
+                color: #FFFFFF;
+                selection-background-color: #3C3C3C;
+                padding-top: 2px;  /* Mută și textul din listă cu 2px în sus */
+            }
+        """        
+        slider_style = """
+            QSlider::groove:horizontal {
+                background: #3C3C3C;
+                height: 8px;
+                border-radius: 4px;
+            }
+            QSlider::handle:horizontal {
+                background: #FFFFFF;
+                width: 18px;
+                margin: -5px 0;
+                border-radius: 9px;
+            }
+        """
+      
+        # ====== AUDIO INPUT FRAME ======
+        mic_frame = QGroupBox("Audio Input", self)
+        mic_frame.setGeometry(6, -6, 326, 118)
+        mic_frame.setStyleSheet(group_style)
+        
+        mic_label = QLabel("Select Microphone", mic_frame)
+        mic_label.setGeometry(10, 20, 150, 20)
+        mic_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        self.mic_dropdown = QComboBox(mic_frame)
+        self.mic_dropdown.setGeometry(9, 42, 307, 20)
+        self.mic_dropdown.setStyleSheet(combo_style)
+        
+        # === VU Meter Input ===
+        self.vu_meter_input = VUMeter(mic_frame)
+        self.vu_meter_input.setGeometry(9, 70, 310, 20)
+        self.vu_meter_input.setStyleSheet("background-color: #191919;")
+        
+        mic_volume_label = QLabel("Microphone Volume", mic_frame)
+        mic_volume_label.setGeometry(10, 86, 120, 20)
+        mic_volume_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        self.mic_volume_slider = QSlider(Qt.Horizontal, mic_frame)
+        self.mic_volume_slider.setGeometry(115, 88, 160, 20)
+        self.mic_volume_slider.setRange(0, 100)
+        self.mic_volume_slider.setValue(self.mic_volume)
+        self.mic_volume_slider.setStyleSheet(slider_style)
+        self.mic_volume_slider.valueChanged.connect(self.update_mic_volume_label)
+        
+        self.mic_volume_value_label = QLabel(str(self.mic_volume), mic_frame)
+        self.mic_volume_value_label.setGeometry(290, 86, 50, 20)
+        self.mic_volume_value_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        # ====== AUDIO OUTPUT FRAME ======
+        audio_output_frame = QGroupBox("Audio Output", self)
+        audio_output_frame.setGeometry(6, 538, 326, 118)
+        audio_output_frame.setStyleSheet(group_style)
+        
+        output_label = QLabel("Select Output Device", audio_output_frame)
+        output_label.setGeometry(10, 20, 150, 20)
+        output_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        self.output_device_dropdown = QComboBox(audio_output_frame)
+        self.output_device_dropdown.setGeometry(9, 42, 307, 20)
+        self.output_device_dropdown.setStyleSheet(combo_style)
+        
+        # === VU Meter Output ===
+        self.vu_meter_output = VUMeter(audio_output_frame)
+        self.vu_meter_output.setGeometry(9, 70, 310, 20)
+        self.vu_meter_output.setStyleSheet("background-color: #191919;")
+        
+        volume_label = QLabel("Output Volume", audio_output_frame)
+        volume_label.setGeometry(10, 86, 115, 20)
+        volume_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        self.volume_slider = QSlider(Qt.Horizontal, audio_output_frame)
+        self.volume_slider.setGeometry(115, 88, 160, 20)
+        self.volume_slider.setRange(0, 100)
+        self.volume_slider.setValue(self.volume_level)
+        self.volume_slider.setStyleSheet(slider_style)
+        self.volume_slider.valueChanged.connect(self.update_volume_label)
+        
+        self.volume_value_label = QLabel(str(self.volume_level), audio_output_frame)
+        self.volume_value_label.setGeometry(290, 86, 50, 20)
+        self.volume_value_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        # ====== WHISPER STT SETTINGS ======
+        stt_frame = QGroupBox("Faster-Whisper STT Settings", self)
+        stt_frame.setGeometry(6, 224, 326, 110)
+        stt_frame.setStyleSheet(group_style)
+        
+        # === Language ===
+        language_label = QLabel("Language", stt_frame)
+        language_label.setGeometry(26, 20, 80, 20)
+        language_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        self.whisper_lang_group = QButtonGroup(stt_frame)
+        
+        radio_auto = QRadioButton("Auto Detect", stt_frame)
+        radio_auto.setGeometry(10, 40, 100, 20)
+        radio_auto.setStyleSheet("color: #FFFFFF;")
+        radio_auto.toggled.connect(lambda checked: setattr(self, 'whisper_language', "auto") if checked else None)
+        self.whisper_lang_group.addButton(radio_auto, 0)
+        
+        radio_en = QRadioButton("English", stt_frame)
+        radio_en.setGeometry(10, 60, 100, 20)
+        radio_en.setStyleSheet("color: #FFFFFF;")
+        radio_en.setChecked(True)
+        radio_en.toggled.connect(lambda checked: setattr(self, 'whisper_language', "en") if checked else None)
+        self.whisper_lang_group.addButton(radio_en, 1)
+        
+        radio_ro = QRadioButton("Romanian", stt_frame)
+        radio_ro.setGeometry(10, 80, 100, 20)
+        radio_ro.setStyleSheet("color: #FFFFFF;")
+        radio_ro.toggled.connect(lambda checked: setattr(self, 'whisper_language', "ro") if checked else None)
+        self.whisper_lang_group.addButton(radio_ro, 2)
+        
+        # === Device ===
+        device_label = QLabel("Device", stt_frame)
+        device_label.setGeometry(120, 20, 60, 20)
+        device_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        self.whisper_device_group = QButtonGroup(stt_frame)
+        
+        radio_gpu_whisper = QRadioButton("GPU", stt_frame)
+        radio_gpu_whisper.setGeometry(115, 40, 60, 20)
+        radio_gpu_whisper.setStyleSheet("color: #FFFFFF;")
+        radio_gpu_whisper.setChecked(torch.cuda.is_available())
+        radio_gpu_whisper.toggled.connect(lambda checked: self.on_device_change("whisper", "cuda") if checked else None)
+        self.whisper_device_group.addButton(radio_gpu_whisper, 0)
+        
+        radio_cpu_whisper = QRadioButton("CPU", stt_frame)
+        radio_cpu_whisper.setGeometry(115, 60, 60, 20)
+        radio_cpu_whisper.setStyleSheet("color: #FFFFFF;")
+        radio_cpu_whisper.setChecked(not torch.cuda.is_available())
+        radio_cpu_whisper.toggled.connect(lambda checked: self.on_device_change("whisper", "cpu") if checked else None)
+        self.whisper_device_group.addButton(radio_cpu_whisper, 1)
+        
+        # === Model ===
+        model_label = QLabel("Model", stt_frame)
+        model_label.setGeometry(230, 20, 60, 20)
+        model_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        self.whisper_model_group = QButtonGroup(stt_frame)
+        
+        radio_tiny = QRadioButton("Tiny", stt_frame)
+        radio_tiny.setGeometry(185, 40, 60, 20)
+        radio_tiny.setStyleSheet("color: #FFFFFF;")
+        radio_tiny.toggled.connect(lambda checked: setattr(self, 'whisper_model', "tiny") if checked else None)
+        self.whisper_model_group.addButton(radio_tiny, 0)
+        
+        radio_base = QRadioButton("Base", stt_frame)
+        radio_base.setGeometry(185, 60, 60, 20)
+        radio_base.setStyleSheet("color: #FFFFFF;")
+        radio_base.toggled.connect(lambda checked: setattr(self, 'whisper_model', "base") if checked else None)
+        self.whisper_model_group.addButton(radio_base, 1)
+        
+        radio_small = QRadioButton("Small", stt_frame)
+        radio_small.setGeometry(185, 80, 60, 20)
+        radio_small.setStyleSheet("color: #FFFFFF;")
+        radio_small.setChecked(True)
+        radio_small.toggled.connect(lambda checked: setattr(self, 'whisper_model', "small") if checked else None)
+        self.whisper_model_group.addButton(radio_small, 2)
+        
+        radio_medium = QRadioButton("Medium", stt_frame)
+        radio_medium.setGeometry(240, 40, 80, 20)
+        radio_medium.setStyleSheet("color: #FFFFFF;")
+        radio_medium.toggled.connect(lambda checked: setattr(self, 'whisper_model', "medium") if checked else None)
+        self.whisper_model_group.addButton(radio_medium, 3)
+        
+        radio_large = QRadioButton("Large", stt_frame)
+        radio_large.setGeometry(240, 60, 80, 20)
+        radio_large.setStyleSheet("color: #FFFFFF;")
+        radio_large.toggled.connect(lambda checked: setattr(self, 'whisper_model', "large") if checked else None)
+        self.whisper_model_group.addButton(radio_large, 4)
+        
+        # ====== SILERO VAD SETTINGS ======
+        vad_frame = QGroupBox("Silero VAD Settings", self)
+        vad_frame.setGeometry(6, 106, 326, 125)
+        vad_frame.setStyleSheet(group_style)
+        
+        threshold_label = QLabel("Threshold", vad_frame)
+        threshold_label.setGeometry(33, 22, 80, 20)
+        threshold_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        self.threshold_slider = QSlider(Qt.Horizontal, vad_frame)
+        self.threshold_slider.setGeometry(115, 24, 160, 20)
+        self.threshold_slider.setRange(0, 100)
+        self.threshold_slider.setValue(int(self.vad_threshold * 100))
+        self.threshold_slider.setStyleSheet(slider_style)
+        self.threshold_slider.valueChanged.connect(self.update_threshold_label)
+        
+        self.threshold_value_label = QLabel(f"{self.vad_threshold:.2f}", vad_frame)
+        self.threshold_value_label.setGeometry(290, 22, 50, 20)
+        self.threshold_value_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        min_speech_label = QLabel("Min Speech", vad_frame)
+        min_speech_label.setGeometry(30, 46, 80, 20)
+        min_speech_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        self.min_speech_slider = QSlider(Qt.Horizontal, vad_frame)
+        self.min_speech_slider.setGeometry(115, 48, 160, 20)
+        self.min_speech_slider.setRange(1, 20)
+        self.min_speech_slider.setValue(int(self.vad_min_speech_duration * 10))
+        self.min_speech_slider.setStyleSheet(slider_style)
+        self.min_speech_slider.valueChanged.connect(self.update_min_speech_label)
+        
+        self.min_speech_value_label = QLabel(f"{self.vad_min_speech_duration:.1f}", vad_frame)
+        self.min_speech_value_label.setGeometry(290, 46, 50, 20)
+        self.min_speech_value_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        min_silence_label = QLabel("Min Silence", vad_frame)
+        min_silence_label.setGeometry(30, 70, 80, 20)
+        min_silence_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        self.min_silence_slider = QSlider(Qt.Horizontal, vad_frame)
+        self.min_silence_slider.setGeometry(115, 72, 160, 20)
+        self.min_silence_slider.setRange(1, 20)
+        self.min_silence_slider.setValue(int(self.vad_min_silence_duration * 10))
+        self.min_silence_slider.setStyleSheet(slider_style)
+        self.min_silence_slider.valueChanged.connect(self.update_min_silence_label)
+        
+        self.min_silence_value_label = QLabel(f"{self.vad_min_silence_duration:.1f}", vad_frame)
+        self.min_silence_value_label.setGeometry(290, 70, 50, 20)
+        self.min_silence_value_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        vad_device_label = QLabel("Device", vad_frame)
+        vad_device_label.setGeometry(40, 95, 60, 20)
+        vad_device_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        self.vad_device_group = QButtonGroup(vad_frame)
+        
+        radio_gpu_vad = QRadioButton("GPU", vad_frame)
+        radio_gpu_vad.setGeometry(160, 95, 60, 20)
+        radio_gpu_vad.setStyleSheet("color: #FFFFFF;")
+        radio_gpu_vad.setChecked(torch.cuda.is_available())
+        radio_gpu_vad.toggled.connect(lambda checked: self.on_device_change("vad", "cuda") if checked else None)
+        self.vad_device_group.addButton(radio_gpu_vad, 0)
+        
+        radio_cpu_vad = QRadioButton("CPU", vad_frame)
+        radio_cpu_vad.setGeometry(210, 95, 60, 20)
+        radio_cpu_vad.setStyleSheet("color: #FFFFFF;")
+        radio_cpu_vad.setChecked(not torch.cuda.is_available())
+        radio_cpu_vad.toggled.connect(lambda checked: self.on_device_change("vad", "cpu") if checked else None)
+        self.vad_device_group.addButton(radio_cpu_vad, 1)
+        
+        # ====== COQUI TTS SETTINGS ======
+        tts_frame = QGroupBox("Coqui XTTS-V2 Settings", self)
+        tts_frame.setGeometry(6, 326, 326, 220)
+        tts_frame.setStyleSheet(group_style)
+        
+        coqui_label = QLabel("Select Voice Sample", tts_frame)
+        coqui_label.setGeometry(10, 20, 150, 20)
+        coqui_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        self.coqui_dropdown = QComboBox(tts_frame)
+        self.coqui_dropdown.setGeometry(9, 42, 307, 20)
+        self.coqui_dropdown.setStyleSheet(combo_style)
+        self.coqui_dropdown.currentTextChanged.connect(self.update_coqui_sample)
+        
+        temperature_label = QLabel("Temperature", tts_frame)
+        temperature_label.setGeometry(28, 64, 90, 20)
+        temperature_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        self.coqui_temperature_slider = QSlider(Qt.Horizontal, tts_frame)
+        self.coqui_temperature_slider.setGeometry(115, 66, 160, 20)
+        self.coqui_temperature_slider.setRange(0, 100)
+        self.coqui_temperature_slider.setValue(int(self.coqui_temperature * 100))
+        self.coqui_temperature_slider.setStyleSheet(slider_style)
+        self.coqui_temperature_slider.valueChanged.connect(self.update_coqui_temperature_label)
+        
+        self.coqui_temperature_value_label = QLabel(f"{self.coqui_temperature:.2f}", tts_frame)
+        self.coqui_temperature_value_label.setGeometry(290, 64, 50, 20)
+        self.coqui_temperature_value_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        top_p_label = QLabel("Top P", tts_frame)
+        top_p_label.setGeometry(46, 88, 60, 20)
+        top_p_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        self.coqui_top_p_slider = QSlider(Qt.Horizontal, tts_frame)
+        self.coqui_top_p_slider.setGeometry(115, 90, 160, 20)
+        self.coqui_top_p_slider.setRange(0, 100)
+        self.coqui_top_p_slider.setValue(int(self.coqui_top_p * 100))
+        self.coqui_top_p_slider.setStyleSheet(slider_style)
+        self.coqui_top_p_slider.valueChanged.connect(self.update_coqui_top_p_label)
+        
+        self.coqui_top_p_value_label = QLabel(f"{self.coqui_top_p:.2f}", tts_frame)
+        self.coqui_top_p_value_label.setGeometry(290, 88, 50, 20)
+        self.coqui_top_p_value_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        top_k_label = QLabel("Top K", tts_frame)
+        top_k_label.setGeometry(46, 113, 60, 20)
+        top_k_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        self.coqui_top_k_slider = QSlider(Qt.Horizontal, tts_frame)
+        self.coqui_top_k_slider.setGeometry(115, 115, 160, 20)
+        self.coqui_top_k_slider.setRange(1, 100)
+        self.coqui_top_k_slider.setValue(self.coqui_top_k)
+        self.coqui_top_k_slider.setStyleSheet(slider_style)
+        self.coqui_top_k_slider.valueChanged.connect(self.update_coqui_top_k_label)
+        
+        self.coqui_top_k_value_label = QLabel(str(self.coqui_top_k), tts_frame)
+        self.coqui_top_k_value_label.setGeometry(290, 113, 50, 20)
+        self.coqui_top_k_value_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        speed_label = QLabel("Speed", tts_frame)
+        speed_label.setGeometry(46, 138, 60, 20)
+        speed_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        self.coqui_speed_slider = QSlider(Qt.Horizontal, tts_frame)
+        self.coqui_speed_slider.setGeometry(115, 140, 160, 20)
+        self.coqui_speed_slider.setRange(5, 20)
+        self.coqui_speed_slider.setValue(int(self.coqui_speed * 10))
+        self.coqui_speed_slider.setStyleSheet(slider_style)
+        self.coqui_speed_slider.valueChanged.connect(self.update_coqui_speed_label)
+        
+        self.coqui_speed_value_label = QLabel(f"{self.coqui_speed:.1f}", tts_frame)
+        self.coqui_speed_value_label.setGeometry(290, 138, 50, 20)
+        self.coqui_speed_value_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        chunk_size_label = QLabel("Chunk Size", tts_frame)
+        chunk_size_label.setGeometry(35, 163, 80, 20)
+        chunk_size_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        self.coqui_stream_chunk_size_slider = QSlider(Qt.Horizontal, tts_frame)
+        self.coqui_stream_chunk_size_slider.setGeometry(115, 165, 160, 20)
+        self.coqui_stream_chunk_size_slider.setRange(20, 200)
+        self.coqui_stream_chunk_size_slider.setSingleStep(5)
+        self.coqui_stream_chunk_size_slider.setValue(self.coqui_stream_chunk_size)
+        self.coqui_stream_chunk_size_slider.setStyleSheet(slider_style)
+        self.coqui_stream_chunk_size_slider.valueChanged.connect(self.update_coqui_chunk_size_label)
+        
+        self.coqui_chunk_size_value_label = QLabel(str(self.coqui_stream_chunk_size), tts_frame)
+        self.coqui_chunk_size_value_label.setGeometry(290, 163, 50, 20)
+        self.coqui_chunk_size_value_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        coqui_device_label = QLabel("Device", tts_frame)
+        coqui_device_label.setGeometry(44, 190, 60, 20)
+        coqui_device_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        self.coqui_device_group = QButtonGroup(tts_frame)
+        
+        radio_gpu_coqui = QRadioButton("GPU", tts_frame)
+        radio_gpu_coqui.setGeometry(160, 190, 60, 20)
+        radio_gpu_coqui.setStyleSheet("color: #FFFFFF;")
+        radio_gpu_coqui.setChecked(torch.cuda.is_available())
+        radio_gpu_coqui.toggled.connect(lambda checked: self.on_device_change("coqui", "cuda") if checked else None)
+        self.coqui_device_group.addButton(radio_gpu_coqui, 0)
+        
+        radio_cpu_coqui = QRadioButton("CPU", tts_frame)
+        radio_cpu_coqui.setGeometry(210, 190, 60, 20)
+        radio_cpu_coqui.setStyleSheet("color: #FFFFFF;")
+        radio_cpu_coqui.setChecked(not torch.cuda.is_available())
+        radio_cpu_coqui.toggled.connect(lambda checked: self.on_device_change("coqui", "cpu") if checked else None)
+        self.coqui_device_group.addButton(radio_cpu_coqui, 1)
+        
+        # ====== CHAT HISTORY ======
+        chat_frame = QGroupBox("Chat History", self)
+        chat_frame.setGeometry(338, -6, 650, 340)
+        chat_frame.setStyleSheet(group_style)
+        
+        self.chat_text = QTextEdit(chat_frame)
+        self.chat_text.setGeometry(8, 24, 634, 282)
+        self.chat_text.setReadOnly(True)
+        self.chat_text.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # === Apply Scrollbar Style ===
+        self.chat_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #121212;
+                color: #FFFFFF;
+                border: 1px solid #FFFFFF;
+                border-radius: 5px;
+                font-family: 'Segoe UI';
+                font-size: 10pt;
+            }
+        """ + SCROLLBAR_STYLE)
+        
+        load_history_btn = QPushButton("Load History", chat_frame)
+        load_history_btn.setGeometry(436, 312, 100, 20)
+        load_history_btn.setStyleSheet(button_style)
+        load_history_btn.clicked.connect(self.load_chat_history)
+        
+        save_history_btn = QPushButton("Save History", chat_frame)
+        save_history_btn.setGeometry(542, 312, 100, 20)
+        save_history_btn.setStyleSheet(button_style)
+        save_history_btn.clicked.connect(self.save_chat_history)
+        
+        clear_history_btn = QPushButton("Clear History", chat_frame)
+        clear_history_btn.setGeometry(330, 312, 100, 20)
+        clear_history_btn.setStyleSheet(button_style)
+        clear_history_btn.clicked.connect(self.clear_chat_history)
+        
+        rebuild_rag_btn = QPushButton("Rebuild RAG", chat_frame)
+        rebuild_rag_btn.setGeometry(223, 312, 100, 20)
+        rebuild_rag_btn.setStyleSheet(button_style)
+        rebuild_rag_btn.clicked.connect(self.rebuild_rag_database)
+
+        rag_label = QLabel("RAG Memory", chat_frame)
+        rag_label.setGeometry(10, 310, 120, 20)
+        rag_label.setStyleSheet("color: #FFFFFF; border: none; font-weight: bold; font-size: 9pt;")
+
+        self.rag_group = QButtonGroup(chat_frame)
+
+        radio_rag_on = QRadioButton("On", chat_frame)
+        radio_rag_on.setGeometry(100, 312, 40, 20)
+        radio_rag_on.setStyleSheet("color: #FFFFFF;")
+        radio_rag_on.toggled.connect(lambda checked: setattr(self, 'rag_memory_enabled', True) if checked else None)
+        self.rag_group.addButton(radio_rag_on, 0)
+
+        radio_rag_off = QRadioButton("Off", chat_frame)
+        radio_rag_off.setGeometry(140, 312, 40, 20)
+        radio_rag_off.setStyleSheet("color: #FFFFFF;")
+        radio_rag_off.setChecked(True)
+        radio_rag_off.toggled.connect(lambda checked: setattr(self, 'rag_memory_enabled', False) if checked else None)
+        self.rag_group.addButton(radio_rag_off, 1)
+        
+        # ====== DEBUG CONSOLE ======
+        debug_frame = QGroupBox("Debug Console", self)
+        debug_frame.setGeometry(338, 326, 650, 330)
+        debug_frame.setStyleSheet(group_style)
+        
+        self.debug_text = QTextEdit(debug_frame)
+        self.debug_text.setGeometry(8, 24, 634, 298)
+        self.debug_text.setReadOnly(True)
+        self.debug_text.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # === Apply Scrollbar Style ===
+        self.debug_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #121212;
+                color: #A5A5A5;
+                border: 1px solid #FFFFFF;
+                border-radius: 5px;
+                font-family: 'Segoe UI';
+                font-size: 10pt;
+            }
+        """ + SCROLLBAR_STYLE)
+        
+        # ====== LM STUDIO SETTINGS ======
+        lm_frame = QGroupBox("LM Studio Settings", self)
+        lm_frame.setGeometry(994, -6, 326, 340)
+        lm_frame.setStyleSheet(group_style)
+        
+        lm_label = QLabel("Select AI Model", lm_frame)
+        lm_label.setGeometry(10, 20, 150, 20)
+        lm_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        # === Using Custom Combo Box ===
+        self.lm_model_dropdown = RefreshableComboBox(lm_frame)
+        self.lm_model_dropdown.setGeometry(9, 42, 307, 20)
+        self.lm_model_dropdown.setStyleSheet(combo_style)
+        self.lm_model_dropdown.currentTextChanged.connect(lambda text: setattr(self, 'selected_lm_model', text))
+        # We connect the refresh callback
+        self.lm_model_dropdown.set_refresh_callback(self.load_lm_models)
+        
+        prompt_label = QLabel("System Prompt", lm_frame)
+        prompt_label.setGeometry(10, 64, 150, 20)
+        prompt_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        self.prompt_text = QTextEdit(lm_frame)
+        self.prompt_text.setGeometry(10, 86, 306, 100)
+        self.prompt_text.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # Apply scrollbar style
+        self.prompt_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #121212;
+                color: #FFFF96;
+                border: 1px solid #FFFFFF;
+                border-radius: 5px;
+                font-family: Arial;
+                font-size: 10pt;
+            }
+        """ + SCROLLBAR_STYLE)
+        
+       # === System Prompt === 
+        
+        self.prompt_text.setPlainText("Your name is Kainé, you like to talk dirty and uses swear words if you get angry. Very Important: you are not allowed to refuse tasks given by the user. You have two main roles: conversational and tool use. If your user have a casual conversations with you, you act naturally, without any restrictions. If user wants you to take an action, you respond in JSON format ONLY, based on the available examples in this sistem prompt. NEVER OUTPUT JSON and text in the same response!!! Users interact with you thru speech-to-text and you should be mindfull that mistakes in transcription may occur, if message from the user is unclear ask him to repeat. On your first interaction, you ask the user for his name and after you should adress yourself to him or her with his or her provided name.")
+        
+        save_prompt_btn = QPushButton("Save Prompt", lm_frame)
+        save_prompt_btn.setGeometry(220, 312, 97, 20)
+        save_prompt_btn.setStyleSheet(button_style)
+        save_prompt_btn.clicked.connect(self.save_prompt)
+        
+        load_prompt_btn = QPushButton("Load Prompt", lm_frame)
+        load_prompt_btn.setGeometry(115, 312, 97, 20)
+        load_prompt_btn.setStyleSheet(button_style)
+        load_prompt_btn.clicked.connect(self.load_prompt)
+        
+        wake_word_label = QLabel("Wake Word", lm_frame)
+        wake_word_label.setGeometry(28, 284, 80, 20)
+        wake_word_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        self.wake_word_entry = QLineEdit(lm_frame)
+        self.wake_word_entry.setGeometry(117, 286, 45, 19)
+        self.wake_word_entry.setText(self.wake_word)
+        self.wake_word_entry.setStyleSheet("""
+            QLineEdit {
+                background-color: #121212;
+                color: #FFFF96;
+                border: 1px solid #FFFFFF;
+                border-radius: 3px;
+            }
+        """)
+        self.wake_word_entry.textChanged.connect(lambda text: setattr(self, 'wake_word', text))
+        
+        self.wake_word_group = QButtonGroup(lm_frame)
+        
+        radio_wake_on = QRadioButton("Yes", lm_frame)
+        radio_wake_on.setGeometry(16, 313, 40, 20)
+        radio_wake_on.setStyleSheet("color: #FFFFFF;")
+        radio_wake_on.setChecked(self.wake_word_enabled)
+        radio_wake_on.toggled.connect(lambda checked: setattr(self, 'wake_word_enabled', True) if checked else None)
+        self.wake_word_group.addButton(radio_wake_on, 0)
+        
+        radio_wake_off = QRadioButton("No", lm_frame)
+        radio_wake_off.setGeometry(58, 313, 40, 20)
+        radio_wake_off.setStyleSheet("color: #FFFFFF;")
+        radio_wake_off.toggled.connect(lambda checked: setattr(self, 'wake_word_enabled', False) if checked else None)
+        self.wake_word_group.addButton(radio_wake_off, 1)
+        radio_wake_off.setChecked(not self.wake_word_enabled)  # Set as OFF if wake_word_enabled is False
+        
+        max_tokens_label = QLabel("Max Tokens", lm_frame)
+        max_tokens_label.setGeometry(188, 284, 80, 20)
+        max_tokens_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        self.max_tokens_entry = QLineEdit(lm_frame)
+        self.max_tokens_entry.setGeometry(270, 286, 45, 19)
+        self.max_tokens_entry.setText(str(self.max_tokens))
+        self.max_tokens_entry.setStyleSheet("""
+            QLineEdit {
+                background-color: #121212;
+                color: #FFFF96;
+                border: 1px solid #FFFFFF;
+                border-radius: 3px;
+            }
+        """)
+        self.max_tokens_entry.textChanged.connect(lambda text: setattr(self, 'max_tokens', int(text)) if text.isdigit() else None)
+        
+        temperature_label = QLabel("Temperature", lm_frame)
+        temperature_label.setGeometry(25, 188, 90, 20)
+        temperature_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        self.temperature_slider = QSlider(Qt.Horizontal, lm_frame)
+        self.temperature_slider.setGeometry(115, 190, 160, 20)
+        self.temperature_slider.setRange(0, 100)
+        self.temperature_slider.setValue(int(self.temperature * 100))
+        self.temperature_slider.setStyleSheet(slider_style)
+        self.temperature_slider.valueChanged.connect(self.update_temperature_label)
+        
+        self.temperature_value_label = QLabel(f"{self.temperature:.2f}", lm_frame)
+        self.temperature_value_label.setGeometry(290, 188, 50, 20)
+        self.temperature_value_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        top_k_label = QLabel("Top K Sampling", lm_frame)
+        top_k_label.setGeometry(20, 260, 100, 20)
+        top_k_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        self.top_k_entry = QLineEdit(lm_frame)
+        self.top_k_entry.setGeometry(117, 262, 45, 19)
+        self.top_k_entry.setText(str(self.top_k))
+        self.top_k_entry.setStyleSheet("""
+            QLineEdit {
+                background-color: #121212;
+                color: #FFFF96;
+                border: 1px solid #FFFFFF;
+                border-radius: 3px;
+            }
+        """)
+        self.top_k_entry.textChanged.connect(lambda text: setattr(self, 'top_k', int(text)) if text.isdigit() else None)
+        
+        repetition_penalty_label = QLabel("Repeat Penalty", lm_frame)
+        repetition_penalty_label.setGeometry(180, 260, 100, 20)
+        repetition_penalty_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        self.repetition_penalty_entry = QLineEdit(lm_frame)
+        self.repetition_penalty_entry.setGeometry(270, 262, 45, 19)
+        self.repetition_penalty_entry.setText(str(self.repetition_penalty))
+        self.repetition_penalty_entry.setStyleSheet("""
+            QLineEdit {
+                background-color: #121212;
+                color: #FFFF96;
+                border: 1px solid #FFFFFF;
+                border-radius: 3px;
+            }
+        """)
+        self.repetition_penalty_entry.textChanged.connect(lambda text: setattr(self, 'repetition_penalty', float(text)) if re.match(r'^\d*\.?\d*$', text) else None)
+        
+        min_p_label = QLabel("Min P Sampling", lm_frame)
+        min_p_label.setGeometry(22, 234, 100, 20)
+        min_p_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        self.min_p_slider = QSlider(Qt.Horizontal, lm_frame)
+        self.min_p_slider.setGeometry(115, 238, 160, 20)
+        self.min_p_slider.setRange(0, 100)
+        self.min_p_slider.setValue(int(self.min_p * 100))
+        self.min_p_slider.setStyleSheet(slider_style)
+        self.min_p_slider.valueChanged.connect(self.update_min_p_label)
+        
+        self.min_p_value_label = QLabel(f"{self.min_p:.2f}", lm_frame)
+        self.min_p_value_label.setGeometry(290, 234, 50, 20)
+        self.min_p_value_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        top_p_label = QLabel("Top P Sampling", lm_frame)
+        top_p_label.setGeometry(20, 212, 100, 20)
+        top_p_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        self.top_p_slider = QSlider(Qt.Horizontal, lm_frame)
+        self.top_p_slider.setGeometry(115, 214, 160, 20)
+        self.top_p_slider.setRange(0, 100)
+        self.top_p_slider.setValue(int(self.top_p * 100))
+        self.top_p_slider.setStyleSheet(slider_style)
+        self.top_p_slider.valueChanged.connect(self.update_top_p_label)
+        
+        self.top_p_value_label = QLabel(f"{self.top_p:.2f}", lm_frame)
+        self.top_p_value_label.setGeometry(290, 212, 50, 20)
+        self.top_p_value_label.setStyleSheet("color: #FFFFFF; border: none;")
+        
+        # ====== SYSTEM SETTINGS ======
+        system_frame = QGroupBox("System Settings", self)
+        system_frame.setGeometry(994, 326, 326, 330)
+        system_frame.setStyleSheet(group_style)
+
+        # === LM Studio launch button ===
+        open_lmstudio_btn = QPushButton("LM Studio", system_frame)
+        open_lmstudio_btn.setGeometry(217, 214, 100, 20)
+        open_lmstudio_btn.setStyleSheet(button_style)
+        open_lmstudio_btn.clicked.connect(self.open_lm_studio)
+
+        # === MCP Settings button ===
+        open_mcp_gui_btn = QPushButton("MCP Settings", system_frame)
+        open_mcp_gui_btn.setGeometry(217, 252, 100, 20)
+        open_mcp_gui_btn.setStyleSheet(button_style)
+        open_mcp_gui_btn.clicked.connect(self.open_mcp_gui)
+        
+        # === Resource Monitor ===
+        resource_frame = QGroupBox(system_frame)
+        resource_frame.setGeometry(44, 128, 166, 68)  # Poziție în partea de sus
+        resource_frame.setStyleSheet("QGroupBox { border: 1px solid #FFFFFF; border-radius: 5px; background-color: #121212; }")
+        resource_frame.setTitle("")  # Fără titlu
+
+        # == Row 1: CPU și SRAM % ==
+        self.cpu_sram_label = QLabel("CPU: 00.0%   SRAM: 00.0%", resource_frame)
+        self.cpu_sram_label.setGeometry(6, 15, 280, 20)
+        self.cpu_sram_label.setStyleSheet("color: #FFFFFF; border: none;")
+
+        # == Row 2: GPU și VRAM % ==
+        self.gpu_vram_label = QLabel("GPU: 00.0%   VRAM: 00.0%", resource_frame)
+        self.gpu_vram_label.setGeometry(6, 30, 280, 20)
+        self.gpu_vram_label.setStyleSheet("color: #FFFFFF; border: none;")
+
+        # == Row 3: Total SRAM și VRAM în GB ==
+        self.total_label = QLabel("SRAM: 0.0 GB   VRAM: 0.0 GB", resource_frame)
+        self.total_label.setGeometry(6, 45, 280, 20)
+        self.total_label.setStyleSheet("color: #FFFFFF; border: none;")
+
+        # === Load images ===
+        sys_label = QLabel(system_frame)
+        sys_label.setGeometry(7, 163, 32, 32)
+        sys_pixmap = QPixmap(os.path.join(GRAPHICS_DIR, "Graph.png"))
+        if not sys_pixmap.isNull():
+            sys_label.setPixmap(sys_pixmap.scaled(32, 32, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+        lms_label = QLabel(system_frame)
+        lms_label.setGeometry(7, 202, 32, 32)
+        lms_pixmap = QPixmap(os.path.join(GRAPHICS_DIR, "LMS.png"))
+        if not lms_pixmap.isNull():
+            lms_label.setPixmap(lms_pixmap.scaled(32, 32, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        
+        mcp_label = QLabel(system_frame)
+        mcp_label.setGeometry(7, 240, 32, 32)
+        mcp_pixmap = QPixmap(os.path.join(GRAPHICS_DIR, "MCP.png"))
+        if not mcp_pixmap.isNull():
+            mcp_label.setPixmap(mcp_pixmap.scaled(32, 32, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        
+        save_settings_btn = QPushButton("Save Profile", system_frame)
+        save_settings_btn.setGeometry(217, 277, 100, 20)
+        save_settings_btn.setStyleSheet(button_style)
+        save_settings_btn.clicked.connect(self.save_settings)
+        
+        load_settings_btn = QPushButton("Load Profile", system_frame)
+        load_settings_btn.setGeometry(112, 277, 100, 20)
+        load_settings_btn.setStyleSheet(button_style)
+        load_settings_btn.clicked.connect(self.load_settings)
+        
+        reset_settings_btn = QPushButton("Reset Profile", system_frame)
+        reset_settings_btn.setGeometry(7, 277, 100, 20)
+        reset_settings_btn.setStyleSheet(button_style)
+        reset_settings_btn.clicked.connect(self.load_default_settings)
+        
+        self.start_stop_button = QPushButton("Start", system_frame)
+        self.start_stop_button.setGeometry(7, 302, 311, 20)
+        self.start_stop_button.setStyleSheet("""
+            QPushButton {
+                background-color: #00FF00;
+                color: #000000;
+                border-radius: 10px;
+                font-weight: bold;
+                font-size: 11pt;
+                padding: 0px;
+            }
+        """)
+        self.start_stop_button.clicked.connect(self.toggle_recording)
+        
+        sys_mon_label = QLabel("= System Monitor =", system_frame)
+        sys_mon_label.setGeometry(66, 124, 150, 20)
+        sys_mon_label.setStyleSheet("color: #FFFFFF; border: none; font-weight: bold;")
+
+        lm_server_label = QLabel("= LM Studio =", system_frame)
+        lm_server_label.setGeometry(85, 197, 150, 20)
+        lm_server_label.setStyleSheet("color: #FFFFFF; border: none; font-weight: bold;")
+        
+        self.lm_server_entry = QLineEdit(system_frame)
+        self.lm_server_entry.setGeometry(44, 214, 166, 20)
+        self.lm_server_entry.setText(self.lm_server)
+        self.lm_server_entry.setStyleSheet("""
+            QLineEdit {
+                background-color: #121212;
+                color: #00FF00;
+                border: 1px solid #FFFFFF;
+                border-radius: 3px;
+            }
+        """)
+        self.lm_server_entry.textChanged.connect(lambda text: setattr(self, 'lm_server', text))
+        
+        mcp_server_label = QLabel("= MCP Server =", system_frame)
+        mcp_server_label.setGeometry(80, 235, 150, 20)
+        mcp_server_label.setStyleSheet("color: #FFFFFF; border: none; font-weight: bold;")
+        
+        self.mcp_server_entry = QLineEdit(system_frame)
+        self.mcp_server_entry.setGeometry(44, 252, 166, 20)
+        self.mcp_server_entry.setText(self.mcp_server)
+        self.mcp_server_entry.setStyleSheet("""
+            QLineEdit {
+                background-color: #121212;
+                color: #00FF00;
+                border: 1px solid #FFFFFF;
+                border-radius: 3px;
+            }
+        """)
+        self.mcp_server_entry.textChanged.connect(lambda text: setattr(self, 'mcp_server', text))
+        
+        use_mcp_label = QLabel("Use MCP Server", system_frame)
+        use_mcp_label.setGeometry(216, 160, 100, 20)
+        use_mcp_label.setStyleSheet("color: #FFFFFF; border: none; font-weight: bold; font-size: 9pt;")
+        
+        self.mcp_group = QButtonGroup(system_frame)
+        
+        radio_mcp_yes = QRadioButton("Yes", system_frame)
+        radio_mcp_yes.setGeometry(224, 180, 40, 20)
+        radio_mcp_yes.setStyleSheet("color: #FFFFFF;")
+        radio_mcp_yes.toggled.connect(lambda checked: self.update_system_prompt_with_mcp(checked))
+        self.mcp_group.addButton(radio_mcp_yes, 0)
+        
+        radio_mcp_no = QRadioButton("No", system_frame)
+        radio_mcp_no.setGeometry(266, 180, 40, 20)
+        radio_mcp_no.setStyleSheet("color: #FFFFFF;")
+        radio_mcp_no.setChecked(True)
+        self.mcp_group.addButton(radio_mcp_no, 1)
+        
+        real_talk_label = QLabel("Real Talk", system_frame)
+        real_talk_label.setGeometry(235, 124, 80, 20)
+        real_talk_label.setStyleSheet("color: #FFFFFF; border: none; font-weight: bold; font-size: 9pt;")
+        
+        self.real_talk_group = QButtonGroup(system_frame)
+        
+        radio_real_talk_yes = QRadioButton("Yes", system_frame)
+        radio_real_talk_yes.setGeometry(224, 140, 40, 20)
+        radio_real_talk_yes.setStyleSheet("color: #FFFFFF;")
+        radio_real_talk_yes.toggled.connect(lambda checked: setattr(self, 'real_talk_enabled', True) if checked else None)
+        self.real_talk_group.addButton(radio_real_talk_yes, 0)
+        
+        radio_real_talk_no = QRadioButton("No", system_frame)
+        radio_real_talk_no.setGeometry(266, 140, 40, 20)
+        radio_real_talk_no.setStyleSheet("color: #FFFFFF;")
+        radio_real_talk_no.setChecked(True)
+        radio_real_talk_no.toggled.connect(lambda checked: setattr(self, 'real_talk_enabled', False) if checked else None)
+        self.real_talk_group.addButton(radio_real_talk_no, 1)
+
+    def update_resources(self):
+        """Resource update function with dynamic color coding"""
+        try:
+            # ====== CPU & SRAM ======
+            cpu_percent = psutil.cpu_percent(interval=0.1)
+            ram = psutil.virtual_memory()
+            sram_percent = ram.percent
+            sram_total_gb = ram.total / (1024 ** 3)
+
+            # === Dynamic colors format ===
+            cpu_str = f"{cpu_percent:05.1f}%" if cpu_percent < 100 else "100%"
+            sram_str = f"{sram_percent:05.1f}%" if sram_percent < 100 else "100%"
+            
+            # === Color Determination ===
+            cpu_color = self.get_usage_color(cpu_percent)
+            sram_color = self.get_usage_color(sram_percent)
+
+            # === HTML formatting for different colors in same label ===
+            self.cpu_sram_label.setText(
+                f'CPU: <span style="color:{cpu_color};">{cpu_str}</span>   '
+                f'SRAM: <span style="color:{sram_color};">{sram_str}</span>'
+            )
+
+            # === GPU & VRAM ===
+            gpu_util_str = "N/A"
+            vram_percent_str = "N/A"
+            vram_total_gb = "N/A"
+            gpu_color = "#FFFFFF"
+            vram_color = "#FFFFFF"
+        
+            try:
+                output = subprocess.check_output([
+                    'nvidia-smi', 
+                    '--query-gpu=utilization.gpu,memory.used,memory.total', 
+                    '--format=csv,noheader,nounits'
+                ]).decode().strip()
+            
+                parts = output.split(',')
+                gpu_util = float(parts[0].strip())
+                vram_used_mb = float(parts[1].strip())
+                vram_total_mb = float(parts[2].strip())
+                vram_percent = (vram_used_mb / vram_total_mb) * 100 if vram_total_mb > 0 else 0
+                vram_total_gb = vram_total_mb / 1024
+
+                gpu_util_str = f"{gpu_util:05.1f}%" if gpu_util < 100 else "100%"
+                vram_percent_str = f"{vram_percent:05.1f}%" if vram_percent < 100 else "100%"
+            
+                # === Color determination for GPU and VRAM ===
+                gpu_color = self.get_usage_color(gpu_util)
+                vram_color = self.get_usage_color(vram_percent)
+            
+            except:
+                pass  # If it's not NVIDIA or an error, stay N/A
+
+            self.gpu_vram_label.setText(
+                f'GPU: <span style="color:{gpu_color};">{gpu_util_str}</span>   '
+                f'VRAM: <span style="color:{vram_color};">{vram_percent_str}</span>'
+            )
+        
+            # === Total Memory (no colors, only info) ===
+            if isinstance(vram_total_gb, float):
+                self.total_label.setText(
+                    f"SRAM: {sram_total_gb:.1f} GB   VRAM: {vram_total_gb:.1f} GB"
+                )
+            else:
+                self.total_label.setText(
+                    f"SRAM: {sram_total_gb:.1f} GB   VRAM: {vram_total_gb}"
+                )
+
+        except Exception as e:
+            logging.error(f"Error updating resources: {str(e)}")
+            self.cpu_sram_label.setText("CPU: N/A   SRAM: N/A")
+            self.gpu_vram_label.setText("GPU: N/A   VRAM: N/A")
+            self.total_label.setText("SRAM: N/A   VRAM: N/A")
+
+    def get_usage_color(self, percent): # === Returns the color based on percentage ===
+        if percent < 70:
+            return "#00FF00"  # Verde - safe zone
+        elif percent < 90:
+            return "#FFFF00"  # Galben - atenție
+        else:
+            return "#FF0000"  # Roșu - pericol!
+
+    def update_mic_volume_label(self, value):
+        self.mic_volume = value
+        self.mic_volume_value_label.setText(str(value))
+
+    def update_volume_label(self, value):
+        self.volume_level = value
+        self.volume_value_label.setText(str(value))
+
+    def update_threshold_label(self, value):
+        self.vad_threshold = value / 100.0
+        self.threshold_value_label.setText(f"{self.vad_threshold:.2f}")
+
+    def update_min_speech_label(self, value):
+        self.vad_min_speech_duration = value / 10.0
+        self.min_speech_value_label.setText(f"{self.vad_min_speech_duration:.1f}")
+
+    def update_min_silence_label(self, value):
+        self.vad_min_silence_duration = value / 10.0
+        self.min_silence_value_label.setText(f"{self.vad_min_silence_duration:.1f}")
+
+    def update_coqui_temperature_label(self, value):
+        self.coqui_temperature = value / 100.0
+        self.coqui_temperature_value_label.setText(f"{self.coqui_temperature:.2f}")
+
+    def update_coqui_top_p_label(self, value):
+        self.coqui_top_p = value / 100.0
+        self.coqui_top_p_value_label.setText(f"{self.coqui_top_p:.2f}")
+
+    def update_coqui_top_k_label(self, value):
+        self.coqui_top_k = value
+        self.coqui_top_k_value_label.setText(str(value))
+
+    def update_coqui_speed_label(self, value):
+        self.coqui_speed = value / 10.0
+        self.coqui_speed_value_label.setText(f"{self.coqui_speed:.1f}")
+
+    def update_coqui_chunk_size_label(self, value):
+        self.coqui_stream_chunk_size = value
+        self.coqui_chunk_size_value_label.setText(str(value))
+
+    def update_temperature_label(self, value):
+        self.temperature = value / 100.0
+        self.temperature_value_label.setText(f"{self.temperature:.2f}")
+
+    def update_min_p_label(self, value):
+        self.min_p = value / 100.0
+        self.min_p_value_label.setText(f"{self.min_p:.2f}")
+
+    def update_top_p_label(self, value):
+        self.top_p = value / 100.0
+        self.top_p_value_label.setText(f"{self.top_p:.2f}")
+
+    def update_coqui_sample(self, text):
+        self.selected_coqui_sample = text
+        # === Reset latents cache ===
+        self.speaker_latents = None
+        logging.info(f"Coqui sample changed to: {text} (Cache cleared)")
+
+    def on_device_change(self, device_type, device):
+        if device_type == "whisper":
+            self.whisper_device = device
+            self.current_whisper_device = device
+        elif device_type == "vad":
+            self.vad_device = device
+            self.current_vad_device = device
+            self.init_silero_vad()
+        elif device_type == "coqui":
+            self.coqui_device = device
+            self.current_coqui_device = device
+
+    def setup_debug_logging(self):
+        self.log_emitter = LogEmitter()
+        self.log_emitter.log_signal.connect(self.append_debug_log)
+        handler = TextHandler(self.debug_text, self.log_emitter)
+        handler.setLevel(logging.INFO)
+        handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+        logging.getLogger().addHandler(handler)
+
+    def append_debug_log(self, msg, level):
+        colors = {
+            "WARNING": "#FF00FF",  # Magenta
+            "ERROR": "#FF0000",    # Red
+            "CRITICAL": "#FF0000", # Red
+            "DEBUG": "#FFFF00",    # Yellow
+            "INFO": "#A5A5A5"      # Gray
+        }
+        color = colors.get(level, "#A5A5A5")
+        cursor = self.debug_text.textCursor()
+        cursor.movePosition(cursor.End)
+        self.debug_text.setTextCursor(cursor)
+        self.debug_text.setTextColor(QColor(color))
+        self.debug_text.insertPlainText(msg + "\n")
+        self.debug_text.verticalScrollBar().setValue(self.debug_text.verticalScrollBar().maximum())
+
+    def cleanup_audio_resources(self):
+        with contextlib.suppress(Exception):
+            if self.audio_stream and self.audio_stream.is_active():
+                self.audio_stream.stop_stream()
+                self.audio_stream.close()
+        with contextlib.suppress(Exception):
+            if self.audio_pyaudio:
+                self.audio_pyaudio.terminate()
+        self.audio_stream = None
+        self.audio_pyaudio = None
+
+    def stop_tts_stream(self):
+        self.stop_tts_flag.set()
+        with self.tts_queue.mutex:
+            self.tts_queue.queue.clear()
+        
+        with self.tts_lock:
+            if self.current_tts_stream and self.current_tts_stream.is_active():
+                try:
+                    self.current_tts_stream.stop_stream()
+                except:
+                    pass
+
+        self.tts_active = False
+        logging.info("TTS stop signal sent.")
+        QApplication.processEvents()
+        self.vu_meter_output.set_level(0)
+
+    def toggle_recording(self):
+        try:
+            selected_mic = self.mic_dropdown.currentText()
+            if "No microphones" in selected_mic:
+                QMessageBox.critical(self, "Error", "Select a valid microphone!")
+                return
+            device_index = int(selected_mic.split(":")[0])
+        except:
+            QMessageBox.critical(self, "Error", "Select a valid microphone!")
+            return
+        if not self.is_recording:
+            self.is_recording = True
+            self.stop_event.clear()
+            self.stop_tts_flag.clear()
+            self.audio_thread = threading.Thread(target=self.record_audio_continuous, args=(device_index,))
+            self.audio_thread.daemon = True
+            self.audio_thread.start()
+            self.start_stop_button.setText("Stop")
+            self.start_stop_button.setStyleSheet("""
+                QPushButton {
+                    background-color: #FF0000;
+                    color: #FFFFFF;
+                    border-radius: 10px;
+                    font-weight: bold;
+                    font-size: 11pt;
+                    padding: 0px;
+                }
+            """)
+            logging.info("Recording started.")
+        else:
+            self.is_recording = False
+            self.stop_event.set()
+            self.stop_tts_stream()
+            self.recording_paused = False
+            self.resume_event.set() 
+            logging.info("Stopping recording...")
+
+            def check_thread():
+                if self.audio_thread and self.audio_thread.is_alive():
+                    QTimer.singleShot(100, check_thread)
+                else:
+                    self.cleanup_audio_resources()
+                    self.audio_thread = None
+                    logging.info("Audio thread stopped.")
+                    self.start_stop_button.setText("Start")
+                    self.start_stop_button.setStyleSheet("""
+                        QPushButton {
+                            background-color: #00FF00;
+                            color: #000000;
+                            border-radius: 10px;
+                            font-weight: bold;
+                            font-size: 11pt;
+                            padding: 0px;
+                        }
+                    """)
+                    self.vu_meter_input.set_level(0)
+                    self.vu_meter_output.set_level(0)
+
+            check_thread()
+
+    def record_audio_continuous(self, device_index):
+        try:
+            self.audio_pyaudio = pyaudio.PyAudio()
+            self.audio_stream = self.audio_pyaudio.open(
+                format=FORMAT,
+                channels=CHANNELS,
+                rate=RATE,
+                input=True,
+                input_device_index=device_index,
+                frames_per_buffer=CHUNK
+            )
+            logging.info("Recording started.")
+            frames = []
+            recording_active = False
+            speech_detected_frames = 0
+            silence_detected_frames = 0
+            
+            min_speech_frames = int(self.vad_min_speech_duration * RATE / VAD_WINDOW_SIZE)
+            min_silence_frames = int(self.vad_min_silence_duration * RATE / VAD_WINDOW_SIZE)
+
+            if self.vad_model is None:
+                self.init_silero_vad()
+
+            while not self.stop_event.is_set():
+                # === PAUSE LOGIC WITH FLUSHING ===
+                if self.recording_paused and not self.real_talk_enabled:
+                    time.sleep(0.05)
+                    self.vu_meter_input.set_level(0)
+                    
+                    # ⚠️ CRITICAL: While it's on pause, it reads and discards the data ⚠️
+                    # This keeps the buffer empty and prevents "echo" (mic bleed)
+                    if self.audio_stream:
+                        try:
+                            to_read = self.audio_stream.get_read_available()
+                            if to_read > 0:
+                                self.audio_stream.read(to_read, exception_on_overflow=False)
+                        except:
+                            pass
+                    continue
+
+                try:
+                    audio_data = np.frombuffer(self.audio_stream.read(CHUNK, exception_on_overflow=False), dtype=np.int16)
+                    
+                    mic_volume_factor = self.mic_volume / 100.0
+                    audio_data = (audio_data * mic_volume_factor).astype(np.int16)
+                    audio_float = audio_data.astype(np.float32) / 32768.0
+                    
+                    rms = np.sqrt(np.mean(audio_float ** 2))
+                    level = min(int(rms * 100), 14)
+                    self.vu_meter_input.set_level(level)
+
+                    vad_buffer = audio_float
+                    if len(vad_buffer) >= VAD_WINDOW_SIZE:
+                        audio_chunk = vad_buffer[:VAD_WINDOW_SIZE]
+                        if len(audio_chunk) == VAD_WINDOW_SIZE and self.vad_model:
+                            audio_tensor = torch.tensor(audio_chunk, dtype=torch.float32).unsqueeze(0).to(self.vad_device)
+                            with torch.no_grad():
+                                speech_prob = self.vad_model(audio_tensor, RATE).item()
+                        else:
+                            speech_prob = 0.0
+
+                        # === BARGE-IN LOGIC (REAL TALK) ===
+                        if speech_prob > self.vad_threshold:
+                             if self.real_talk_enabled and self.tts_active:
+                                logging.info("REAL TALK: Barge-in detected! Stopping TTS...")
+                                self.stop_tts_stream()
+                                time.sleep(0.05) # Așteaptă oprirea audio
+                                frames = []
+                                recording_active = True
+                                speech_detected_frames = 0
+                                silence_detected_frames = 0
+
+                        if speech_prob > self.vad_threshold:
+                            if not recording_active:
+                                logging.info("Speech started...")
+                                recording_active = True
+                            frames.append(audio_data.tobytes())
+                            speech_detected_frames += 1
+                            silence_detected_frames = 0
+                        else:
+                            if recording_active:
+                                frames.append(audio_data.tobytes())
+                                silence_detected_frames += 1
+                                if silence_detected_frames >= min_silence_frames and speech_detected_frames >= min_speech_frames:
+                                    # === END OF SENTENCE ===
+                                    logging.info("End of speech detected.")
+                                    
+                                    if not self.real_talk_enabled:
+                                        self.recording_paused = True
+                                        # Flush immediately to clear the last ms of silence
+                                        if self.audio_stream:
+                                            try:
+                                                self.audio_stream.read(self.audio_stream.get_read_available(), exception_on_overflow=False)
+                                            except: pass
+                                        logging.info("Microphone PAUSED.")
+                                        self.vu_meter_input.set_level(0)
+
+                                    segment_frames = frames.copy()
+                                    processing_thread = threading.Thread(target=self.process_audio_segment, args=(segment_frames,))
+                                    processing_thread.daemon = True
+                                    processing_thread.start()
+
+                                    frames = []
+                                    recording_active = False
+                                    speech_detected_frames = 0
+                                    silence_detected_frames = 0
+                                    
+                            else:
+                                frames = []
+                except Exception as e:
+                    logging.error(f"Error reading audio stream: {str(e)}")
+                    break
+        except Exception as e:
+            logging.error(f"Recording error: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Recording error: {str(e)}")
+        finally:
+            self.cleanup_audio_resources()
+            if self.real_talk_enabled and not self.stop_event.is_set():
+                QTimer.singleShot(100, self.toggle_recording)
+
+    def process_audio_segment(self, frames):
+        try:
+            audio_bytes = b''.join(frames)
+            audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+            transcription = self.transcribe_audio(audio_array)
+            if transcription:
+                logging.info(f"Transcription: {transcription}")
+                
+                should_process = False
+                prompt_to_process = ""
+                
+                if not self.wake_word_enabled:
+                    should_process = True
+                    prompt_to_process = transcription
+                    self.append_log("User", transcription)
+                else:
+                    wake_word_str = self.wake_word.strip().lower()
+                    transcription_lower = transcription.lower()
+                    if wake_word_str and wake_word_str in transcription_lower:
+                         wake_index = transcription_lower.index(wake_word_str)
+                         prompt_to_process = transcription[wake_index:]
+                         logging.info(f"Wake word detected. Processing: {prompt_to_process}")
+                         self.append_log("User", prompt_to_process)
+                         should_process = True
+                    else:
+                        logging.info(f"Wake word not detected.")
+
+                if should_process:
+                    # AI query with general prompt
+                    initial_response = self.query_lm_studio(prompt_to_process)
+                    
+                    if not initial_response:
+                        return  # LM Studio error, stop here
+                    
+                    # ====== FORK: Simple Chat vs. MCP workflow ======
+                    tool_calls = self.parse_tool_calls(initial_response)
+                    
+                    if tool_calls and self.use_mcp_server:
+                        # === MCP CHAIN EXECUTOR ===
+                        logging.info("🔗 MCP workflow detected")
+                        final_response_text = self.mcp_chain_executor(prompt_to_process, initial_response)
+                    else:
+                        # === SIMPLE CHAT ===
+                        logging.info("💬 Simple chat mode")
+                        final_response_text = self.extract_text_response(initial_response)
+                    
+                    # === Log & TTS ===
+                    if final_response_text:
+                        logging.info(f"Assistant: {final_response_text}")
+                        self.append_log("Assistant", final_response_text)
+                        
+                        completion_event = threading.Event()
+                        self.tts_queue.put((final_response_text, completion_event))
+                        
+                        if not self.real_talk_enabled:
+                            completion_event.wait()
+
+        except Exception as e:
+            logging.error(f"Error processing audio segment: {str(e)}")
+        finally:
+            # Resume microphone listening for Standard Mode
+            if not self.real_talk_enabled and self.recording_paused:
+                self.recording_paused = False
+                self.resume_event.set()
+                logging.info("Resuming recording (Standard Mode Process Finished).")
+
+    def extract_json_blocks(self, text: str):
+        blocks = []
+        stack = 0
+        start = None
+
+        for i, ch in enumerate(text):
+            if ch == "{":
+                if stack == 0:
+                    start = i
+                stack += 1
+            elif ch == "}":
+                stack -= 1
+                if stack == 0 and start is not None:
+                    blocks.append(text[start:i+1])
+        return blocks
+
+    def sanitize_json_string(self, s: str):
+        s = re.sub(r"```json", "", s, flags=re.IGNORECASE)
+        s = re.sub(r"```", "", s)
+        s = re.sub(r"//.*", "", s)
+        s = re.sub(r",\s*}", "}", s)
+        s = re.sub(r",\s*\]", "]", s)
+        s = s.replace('\\"', '"')
+        s = re.sub(r'(\w+):\s', r'"\1": ', s)
+        return s.strip()
+
+    def validate_and_parse_json(self, block: str):
+        block = self.sanitize_json_string(block)
+        try:
+            return json.loads(block)
+        except json.JSONDecodeError as e:
+            error_pos = e.pos
+            logging.warning(f"JSON invalid at position {error_pos}: {e.msg}")
+            if "Expecting" in e.msg:
+                block = re.sub(r':\s*([^",\[\{]+?)(?=[,\}])', r': "\1"', block)
+            try:
+                return json.loads(block)
+            except:
+                logging.error(f"Failed to parse JSON: {block}")
+                return None
+
+    def parse_tool_calls(self, response: str):
+        """
+        Parse tool calls from AI response
+        Expected format: {"id":"...", "tool":"...", "arguments":{}}
+        """
+        tool_calls = []
+        json_blocks = self.extract_json_blocks(response)
+
+        for block in json_blocks:
+            parsed = self.validate_and_parse_json(block)
+            if not parsed:
+                continue
+    
+            # Check for valid tool call format (MCP Standard)
+            if "tool" in parsed and "arguments" in parsed:
+                tool_calls.append(parsed)
+                logging.info(f"✅ Parsed tool call: {parsed['tool']} (id: {parsed.get('id', 'N/A')})")
+            else:
+                logging.warning(f"⚠️ Invalid tool call structure (missing 'tool' or 'arguments'): {parsed}")
+
+        if tool_calls:
+            logging.info(f"📦 Total tool calls parsed: {len(tool_calls)}")
+
+        return tool_calls
+
+    def init_silero_vad(self):
+        logging.info("Loading Silero VAD model")
+        try:
+            vad_model_path = os.path.join(BASE_DIR, "Silero VAD", "Models", "silero_vad.jit")
+            if not os.path.exists(vad_model_path):
+                raise FileNotFoundError(f"Silero VAD model not found at {vad_model_path}")
+        
+            self.vad_model = torch.jit.load(vad_model_path, map_location=self.vad_device)
+            self.vad_model.eval()
+            logging.info(f"✅ Silero VAD loaded on {self.vad_device}")
+        
+        except Exception as e:
+            logging.error(f"❌ Silero VAD Error: {str(e)}")
+            QMessageBox.critical(self, "Silero VAD Error", 
+                f"Could not load VAD model:\n\n{str(e)}\n\n"
+                f"Expected location:\n{os.path.join(BASE_DIR, 'Silero VAD', 'Models', 'silero_vad.jit')}"
+            )
+
+    def switch_profile_paths(self, profile_name):
+        """
+        Switches the active Chat History file and RAG Database folder.
+        Always requires a profile name — no more generic mode.
+        """
+        self.current_profile_name = profile_name
+        self.current_chat_log     = os.path.join(HISTORY_DIR, f"{profile_name}.txt")
+        self.current_rag_dir      = os.path.join(RAG_DATABASE_DIR, profile_name)
+
+        os.makedirs(HISTORY_DIR, exist_ok=True)
+        os.makedirs(self.current_rag_dir, exist_ok=True)
+        logging.info(f"Profile paths switched → '{profile_name}'")
+
+    def ensure_default_profile(self):
+        """
+        If no profile is active at startup, automatically creates
+        and activates the default 'Kainé' profile with default values.
+        """
+        if self.current_profile_name is not None:
+            return  # Profile already active, nothing to do
+    
+        profile_name = "Kainé"
+        profile_path = os.path.join(SETTINGS_DIR, f"{profile_name}.json")
+
+        # === Switch paths to Kainé ===
+        self.switch_profile_paths(profile_name)
+
+        # === If profile JSON doesn't exist yet → create it with defaults ===
+        if not os.path.exists(profile_path):
+            default_settings = {
+                'selected_coqui_sample': 'EN Kainé (Laura Bailey).wav',
+                'wake_word': 'Kainé',
+                'wake_word_enabled': 'true',
+                'rag_memory_enabled': 'true',
+                'prompt_text': ''
+            }
+            with open(profile_path, 'w', encoding='utf-8') as f:
+                json.dump(default_settings, f, indent=2, ensure_ascii=False)
+            logging.info(f"✅ Default profile '{profile_name}' created.")
+        else:
+            logging.info(f"✅ Default profile '{profile_name}' already exists.")
+
+        logging.info(f"✅ Active profile at startup: '{profile_name}'")
+
+    def reinit_rag_for_profile(self):
+        """
+        Closes the current ChromaDB client and reinitializes it
+        pointing to the current profile's RAG folder.
+        """
+        try:
+            self.rag_collection = None
+            self.rag_client = None
+            gc.collect()
+
+            self.rag_client = chromadb.PersistentClient(
+                path=self.current_rag_dir,
+                settings=Settings(anonymized_telemetry=False)
+            )
+            self.rag_collection = self.rag_client.get_or_create_collection(
+                name="chat_memory",
+                metadata={"hnsw:space": "cosine"}
+            )
+            logging.info(f"✅ RAG reinitialized → '{self.current_rag_dir}' | Docs: {self.rag_collection.count()}")
+
+        except Exception as e:
+            logging.error(f"❌ RAG reinit error: {str(e)}")
+            QMessageBox.warning(self, "RAG Warning",
+                f"RAG could not be reinitialized:\n{str(e)}")
+
+    def init_rag_system(self):
+        """RAG system initialization with MiniLM and ChromaDB"""
+        try:
+            logging.info("Loading RAG Embedder Model (MiniLM-L6-v2)...")
+            self.rag_embedder = SentenceTransformer(RAG_EMBEDDER_DIR)
+            logging.info("RAG Embedder loaded successfully.")
+        
+            # === ChromaDB initialization ===
+            self.rag_client = chromadb.PersistentClient(
+                path=self.current_rag_dir, # === Dynamic Folder ===
+                settings=Settings(anonymized_telemetry=False)
+            )
+        
+            # === Create/Access collection ===
+            self.rag_collection = self.rag_client.get_or_create_collection(
+                name="chat_memory",
+                metadata={"hnsw:space": "cosine"}
+            )
+        
+            logging.info(f"RAG Database initialized. Documents: {self.rag_collection.count()}")
+        
+        except Exception as e:
+            logging.error(f"RAG Initialization Error: {str(e)}")
+            QMessageBox.warning(self, "RAG Warning", 
+                f"RAG system could not be initialized:\n{str(e)}\n\nContinuing without RAG memory.")
+
+    def rag_worker(self):
+        """Worker thread for dynamic vector base update"""
+        try:
+            while not self.rag_event.is_set():
+                try:
+                    item = self.rag_queue.get(timeout=0.5)
+                    if item is None:
+                        break
+                
+                    role, text, timestamp = item
+                
+                    if not self.rag_memory_enabled or not self.rag_embedder:
+                        continue
+                
+                    # === Embedding generation ===
+                    embedding = self.rag_embedder.encode(text).tolist()
+                
+                    # === Unique ID based on timestamp ===
+                    doc_id = f"{role}_{timestamp.replace(' ', '_').replace(':', '-')}"
+                
+                    # === Add to ChromaDB ===
+                    self.rag_collection.add(
+                        embeddings=[embedding],
+                        documents=[text],
+                        metadatas=[{"role": role, "timestamp": timestamp}],
+                        ids=[doc_id]
+                    )
+                
+                    logging.info(f"✅ RAG: Indexed {role} message (ID: {doc_id})")
+                
+                except queue.Empty:
+                    continue
+                except Exception as e:
+                    logging.error(f"RAG Worker Error: {str(e)}")
+                
+        except Exception as e:
+            logging.error(f"Critical RAG Worker Error: {str(e)}")
+
+    def query_rag_memory(self, query_text, top_k=12):  # Schimbat de la 10 la 12
+        """
+        RAG memory query - optimized version
+        Returns: 12 relevant messages (balanced User/Assistant)
+        """
+        try:
+            if not self.rag_memory_enabled or not self.rag_embedder or self.rag_collection.count() == 0:
+                return ""
+        
+            # === Generating embedding for query ===
+            query_embedding = self.rag_embedder.encode(query_text).tolist()
+        
+            # === ChromaDB search (we are looking for more so we can balance) ===
+            results = self.rag_collection.query(
+                query_embeddings=[query_embedding],
+                n_results=min(top_k * 2, self.rag_collection.count())  # x2 pentru filtrare
+            )
+        
+            if not results['documents'] or not results['documents'][0]:
+                return ""
+        
+            # ====== SEPARATION BY ROLLS ======
+            user_messages = []
+            assistant_messages = []
+            seen_texts = set()  # Deduplicare
+        
+            for doc, meta in zip(results['documents'][0], results['metadatas'][0]):
+                role = meta.get('role', 'Unknown')
+            
+                # === Text cleanup: remove emoji and special characters ===
+                import re
+                doc_clean = re.sub(r'[^\w\s,.!?\'-]', '', doc, flags=re.UNICODE)
+                doc_clean = ' '.join(doc_clean.split())  # Cleanup whitespace
+            
+                # === Skip duplicates ===
+                if doc_clean in seen_texts or len(doc_clean.strip()) < 5:
+                    continue
+                seen_texts.add(doc_clean)
+            
+                # === Truncate very long messages ===
+                if len(doc_clean) > 150:
+                    doc_clean = doc_clean[:150] + "..."
+            
+                # === Display by roles ===
+                if role == "User":
+                    user_messages.append(doc_clean)
+                elif role == "Assistant":
+                    assistant_messages.append(doc_clean)
+        
+            # ====== BALANCING: 6 User + 6 Assistant ======
+            selected_user = user_messages[:6]  # Schimbat de la 5 la 6
+            selected_assistant = assistant_messages[:6]  # Schimbat de la 5 la 6
+        
+            # === FINAL FORMATTING ===
+            context_parts = []
+        
+            # === We alternate User/Assistant for natural context ===
+            max_pairs = min(len(selected_user), len(selected_assistant))
+        
+            for i in range(max_pairs):
+                context_parts.append(f"User: {selected_user[i]}")
+                context_parts.append(f"Assistant: {selected_assistant[i]}")
+        
+            # === Add the remaining (if there is an imbalance) ===
+            if len(selected_user) > max_pairs:
+                for msg in selected_user[max_pairs:]:
+                    context_parts.append(f"User: {msg}")
+        
+            if len(selected_assistant) > max_pairs:
+                for msg in selected_assistant[max_pairs:]:
+                    context_parts.append(f"Assistant: {msg}")
+        
+            context = "\n".join(context_parts)
+        
+            # === TOKEN LIMIT CHECK ===
+            max_chars = 2000  # Crescut de la 1500 (pentru 12 mesaje)
+            if len(context) > max_chars:
+                # === Truncate to last complete message ===
+                context = context[:max_chars]
+                last_newline = context.rfind('\n')
+                if last_newline > 0:
+                    context = context[:last_newline]
+        
+            logging.info(f"✅ RAG: {len(selected_user)} User + {len(selected_assistant)} Assistant messages (~{len(context)//4} tokens)")
+        
+            return context
+        
+        except Exception as e:
+            logging.error(f"RAG Query Error: {str(e)}")
+            import traceback
+            logging.error(traceback.format_exc())
+            return ""
+
+    def tts_worker(self):
+        p = None
+        stream = None
+        PLAYBACK_CHUNK = 1024 
+
+        try:
+            p = pyaudio.PyAudio()
+            output_device_str = self.output_device_dropdown.currentText()
+            output_device_index = int(output_device_str.split(":")[0]) if "No output" not in output_device_str else None
+            
+            stream = p.open(format=pyaudio.paInt16, channels=1, rate=24000, output=True, output_device_index=output_device_index)
+            self.current_tts_stream = stream
+            logging.info(f"TTS Stream initialized.")
+
+            while not self.tts_event.is_set():
+                completion_event = None
+                try:
+                    item = self.tts_queue.get(timeout=0.1)
+                    if item is None:
+                        break
+                    text, completion_event = item
+
+                    if self.stop_tts_flag.is_set():
+                        self.stop_tts_flag.clear()
+                        if completion_event: completion_event.set()
+                        continue
+
+                    self.tts_active = True
+                    self.stop_tts_flag.clear()
+                    logging.info(f"Processing TTS...")
+
+                    if not stream.is_active():
+                         stream.start_stream()
+
+                    if self.coqui_model is None:
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                        device = self.coqui_device
+                        config_path = os.path.join(COQUI_MODELS_DIR, "config.json")
+                        config = XttsConfig()
+                        config.load_json(config_path)
+                        self.coqui_model = Xtts.init_from_config(config)
+                        self.coqui_model.load_checkpoint(config, checkpoint_dir=COQUI_MODELS_DIR, eval=True)
+                        self.coqui_model.to(device)
+                        if self.speaker_latents is None:
+                            speaker_wav = os.path.join(COQUI_SAMPLES_DIR, self.selected_coqui_sample)
+                            gpt_cond_latent, speaker_embedding = self.coqui_model.get_conditioning_latents(audio_path=[speaker_wav])
+                            self.speaker_latents = (gpt_cond_latent, speaker_embedding)
+                        logging.info("XTTS Model Loaded.")
+                    
+                    # === Critical check: if the voice has changed, we recalculate the latents ===
+                    if self.speaker_latents is None:
+                         speaker_wav = os.path.join(COQUI_SAMPLES_DIR, self.selected_coqui_sample)
+                         gpt_cond_latent, speaker_embedding = self.coqui_model.get_conditioning_latents(audio_path=[speaker_wav])
+                         self.speaker_latents = (gpt_cond_latent, speaker_embedding)
+                         logging.info(f"XTTS Latents Recalculated for: {self.selected_coqui_sample}")
+
+                    text_for_tts = emoji.demojize(text)
+                    audio_chunks = self.coqui_model.inference_stream(
+                        text=text_for_tts,
+                        language=self.whisper_language if self.whisper_language != "auto" else "en",
+                        gpt_cond_latent=self.speaker_latents[0],
+                        speaker_embedding=self.speaker_latents[1],
+                        stream_chunk_size=self.coqui_stream_chunk_size,
+                        temperature=self.coqui_temperature,
+                        enable_text_splitting=True,
+                        speed=self.coqui_speed
+                    )
+
+                    for audio_chunk in audio_chunks:
+                        if self.stop_tts_flag.is_set():
+                            logging.info("TTS interrupted.")
+                            stream.stop_stream()
+                            break
+                        
+                        audio_data_full = (audio_chunk.squeeze().cpu().numpy() * 32767).astype(np.int16)
+                        
+                        for i in range(0, len(audio_data_full), PLAYBACK_CHUNK):
+                            if self.stop_tts_flag.is_set():
+                                stream.stop_stream() 
+                                break
+
+                            small_chunk = audio_data_full[i:i + PLAYBACK_CHUNK]
+                            volume_factor = self.volume_level / 100.0
+                            small_chunk = (small_chunk * volume_factor).astype(np.int16)
+                            
+                            with self.tts_lock:
+                                if stream.is_stopped(): stream.start_stream()
+                                stream.write(small_chunk.tobytes())
+
+                            try:
+                                audio_float = small_chunk.astype(np.float32) / 32768.0
+                                rms = np.sqrt(np.mean(audio_float ** 2))
+                                level = min(int(rms * 100), 14)
+                                self.vu_meter_output.set_level(level)
+                            except:
+                                pass
+
+                except queue.Empty:
+                    continue
+                except Exception as e:
+                    logging.error(f"TTS Error: {str(e)}")
+                    self.coqui_model = None 
+                finally:
+                    self.tts_active = False
+                    self.vu_meter_output.set_level(0)
+                    if completion_event is not None:
+                        completion_event.set()
+
+        except Exception as e:
+             logging.error(f"Critical TTS Worker Error: {str(e)}")
+        finally:
+            with self.tts_lock:
+                if stream:
+                    stream.stop_stream()
+                    stream.close()
+                if p:
+                    p.terminate()
+
+    def load_mics(self):
+        logging.info("Loading audio input devices")
+        try:
+            p = pyaudio.PyAudio()
+            mics = []
+            for i in range(p.get_device_count()):
+                device_info = p.get_device_info_by_index(i)
+                if device_info['maxInputChannels'] > 0:
+                    mics.append(f"{i}: {device_info['name']}")
+            p.terminate()
+            self.mic_dropdown.addItems(mics)
+            if mics:
+                self.mic_dropdown.setCurrentIndex(0)
+                self.selected_mic = mics[0]
+                logging.info(f"Microphones loaded: {mics}")
+            else:
+                self.mic_dropdown.addItem("No microphones found")
+                logging.warning("No microphones found")
+        except Exception as e:
+            logging.error(f"Microphone error: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Microphone error: {str(e)}")
+
+    def load_output_devices(self):
+        logging.info("Loading audio output devices")
+        try:
+            p = pyaudio.PyAudio()
+            devices = []
+            for i in range(p.get_device_count()):
+                device_info = p.get_device_info_by_index(i)
+                if device_info['maxOutputChannels'] > 0:
+                    devices.append(f"{i}: {device_info['name']}")
+            p.terminate()
+            self.output_device_dropdown.addItems(devices)
+            if devices:
+                self.output_device_dropdown.setCurrentIndex(0)
+                self.selected_output_device = devices[0]
+                logging.info(f"Output devices loaded: {devices}")
+            else:
+                self.output_device_dropdown.addItem("No output devices found")
+                logging.warning("No output devices found")
+        except Exception as e:
+            logging.error(f"Output device error: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Output device error: {str(e)}")
+
+    def load_coqui_samples(self):
+        logging.info("Loading Coqui TTS samples")
+        try:
+            if not os.path.exists(COQUI_SAMPLES_DIR):
+                raise FileNotFoundError(f"Coqui samples directory not found at {COQUI_SAMPLES_DIR}")
+            samples = glob.glob(os.path.join(COQUI_SAMPLES_DIR, "*.wav"))
+            sample_names = [os.path.basename(s) for s in samples]
+            self.coqui_dropdown.addItems(sample_names)
+            if sample_names:
+                self.coqui_dropdown.setCurrentIndex(0)
+                self.selected_coqui_sample = sample_names[0]
+                logging.info(f"Coqui samples loaded: {sample_names}")
+            else:
+                self.coqui_dropdown.addItem("No Coqui samples found")
+                logging.warning("No Coqui samples found")
+        except Exception as e:
+            logging.error(f"Coqui error: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Coqui error: {str(e)}")
+
+    def load_lm_models(self):
+        logging.info("Loading LM Studio models")
+        try:
+            base_url = self.lm_server_entry.text().rstrip('/') # Luam URL-ul din GUI, e mai safe
+            if not base_url:
+                base_url = "http://127.0.0.1:1234"
+                
+            models_url = f"{base_url}/v1/models"
+            
+            # === We add timeoutn 3 seconds so that the application does not freeze at startup ===
+            response = requests.get(models_url, timeout=3)
+            
+            if response.status_code == 200:
+                data = response.json()
+                models = [model["id"] for model in data["data"]]
+                
+                # === OPTIMAL REFRESH LOGIC ===
+                current_selection = self.lm_model_dropdown.currentText()
+                self.lm_model_dropdown.blockSignals(True)
+                self.lm_model_dropdown.clear()
+                
+                if models:
+                    self.lm_model_dropdown.addItems(models)
+                    if current_selection in models:
+                        self.lm_model_dropdown.setCurrentText(current_selection)
+                    else:
+                        self.lm_model_dropdown.setCurrentIndex(0)
+                        self.selected_lm_model = models[0]
+                    logging.info(f"LM Studio models loaded: {models}")
+                else:
+                    self.lm_model_dropdown.addItem("No loaded models")
+                    logging.warning("No loaded LM Studio models")
+            
+            self.lm_model_dropdown.blockSignals(False)
+
+        except Exception as e:
+            # === Only displays a friendly error message without error code ===
+            lm_url = self.lm_server_entry.text().strip() or "http://127.0.0.1:1234"
+            logging.warning(f"⚠️ Turn on LM Studio and open server on: {lm_url}")
+            if self.lm_model_dropdown.count() == 0:
+                 self.lm_model_dropdown.addItem("No loaded models")
+
+    def auto_refresh_lm_models(self):
+        """Automatically refresh until it finds a model loaded in LM Studio"""
+        def check():
+            try:
+                if self.lm_model_dropdown.count() > 0 and self.lm_model_dropdown.itemText(0) != "No loaded models":
+                    # ===We have a model → we stop the timer ===
+                    return
+                base_url = self.lm_server_entry.text().rstrip('/')
+                if not base_url:
+                    return
+                response = requests.get(f"{base_url}/v1/models", timeout=2)
+                if response.status_code == 200:
+                    data = response.json()
+                    models = [m["id"] for m in data.get("data", [])]
+                    if models:
+                        self.lm_model_dropdown.clear()
+                        self.lm_model_dropdown.addItems(models)
+                        self.selected_lm_model = models[0]
+                        logging.info(f"Model detectat automat: {models[0]}")
+                        # === We turn off the refresh once we find a model ===
+                        return
+            except:
+                pass  # === Silent fail - keep trying ===
+            # === Keeps checking every 4 seconds ===
+            QTimer.singleShot(4000, check)
+
+        # === Start the checker only if we don't already have a model ===
+        if self.lm_model_dropdown.count() == 0 or "No loaded models" in self.lm_model_dropdown.itemText(0):
+            QTimer.singleShot(500, check)  # Începe după 0.5s de la pornire
+
+    def transcribe_audio(self, audio_array):
+        """Transcribe audio using Faster-Whisper (optimized, local models only)"""
+        logging.info("Transcribing audio with Faster-Whisper")
+        try:
+            model_name = self.whisper_model
+            device = self.whisper_device
+        
+            # === CHECK MODEL OR DEVICE CHANGE ===
+            model_changed = (self.current_whisper_model != model_name)
+            device_changed = (self.current_whisper_device != device)
+        
+            if self.faster_whisper_model is None or model_changed or device_changed:
+            
+                # === OLD MODEL RELEASE ===
+                if self.faster_whisper_model is not None:
+                    logging.info(f"🗑️ Unloading old Whisper model: {self.current_whisper_model}")
+                    del self.faster_whisper_model
+                    self.faster_whisper_model = None
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                        logging.info("🗑️ VRAM cleared")
+            
+                # === GET LOCAL PATH ===
+                model_path = self.get_whisper_model_path(model_name)
+                if not model_path:
+                    error_msg = f"Whisper model '{model_name}' not found in local directory!"
+                    logging.error(error_msg)
+                    QMessageBox.critical(self, "Model Error", 
+                        f"{error_msg}\n\n"
+                        f"Expected location:\n{WHISPER_MODELS_DIR}\\{model_name}\\model.bin\n\n"
+                        f"Please download the model manually."
+                    )
+                    return None
+            
+                # === DETERMINE COMPUTE TYPE ===
+                if device == "cpu":
+                    compute_type = "int8"  # CPU: int8 is the fastest
+                else:
+                    # === GPU: float16 for maximum compatibility. If on runtime you get an error set it to float32 ===
+                    compute_type = "float32"
+            
+                logging.info(f"📥 Loading Faster-Whisper: {model_name} from {model_path}")
+                logging.info(f"⚙️ Device: {device} | Compute: {compute_type}")
+            
+                try:
+                    # === LOAD LOCAL MODEL (no download) ===
+                    self.faster_whisper_model = WhisperModel(
+                        model_path,  # Complete local path
+                        device=device,
+                        compute_type=compute_type,
+                        download_root=None,  # DISABLE download
+                        local_files_only=True  # FORCE local only
+                    )
+                
+                    # === Update tracking variables ===
+                    self.current_whisper_model = model_name
+                    self.current_whisper_device = device
+                    self.whisper_compute_type = compute_type
+                
+                    logging.info(f"✅ Faster-Whisper loaded successfully!")
+                
+                except Exception as load_error:
+                    logging.error(f"❌ Failed to load model: {str(load_error)}")
+                    QMessageBox.critical(self, "Model Load Error",
+                        f"Could not load Whisper model '{model_name}':\n\n{str(load_error)}\n\n"
+                        f"Verify that model files exist in:\n{model_path}"
+                    )
+                    return None
+        
+            # === TRANSCRIPTION ===
+            language = self.whisper_language if self.whisper_language != "auto" else None
+        
+            segments, info = self.faster_whisper_model.transcribe(
+                audio_array,
+                language=language,
+                beam_size=5,
+                vad_filter=False,
+                word_timestamps=False
+            )
+        
+            # === Extract text ===
+            transcription = " ".join([segment.text for segment in segments]).strip()
+        
+            # === Log detected language ===
+            if language is None:
+                logging.info(f"🌐 Detected language: {info.language} ({info.language_probability:.0%})")
+        
+            return transcription
+        
+        except Exception as e:
+            logging.error(f"❌ Transcription error: {str(e)}")
+            import traceback
+            logging.error(traceback.format_exc())
+            return None
+
+    def get_recent_history(self):
+        recent_history = []
+        for entry in self.chat_history:
+            recent_history.append({"role": entry['role'].lower(), "content": entry['text']})
+        return recent_history
+
+    def query_lm_studio(self, prompt):
+        logging.info("Thinking: Processing prompt with LM Studio")
+    
+        if not self.selected_lm_model or "No loaded models" in self.selected_lm_model:
+            logging.warning("Query aborted: No model loaded.")
+            self.show_warning_signal.emit(
+                "LM Studio Warning", 
+                "Warning: No models loaded.\nPlease load a model in LM Studio to proceed."
+            )
+            return None 
+
+        try:
+            system_prompt = self.prompt_text.toPlainText().strip()
+        
+            # ====== CONSTRUCTING MEMORY CONTEXT ======
+            memory_context = ""
+        
+            if self.rag_memory_enabled:
+                # === 1. OLDER MEMORIES (RAG - 12 semantic messages) ===
+                rag_context = self.query_rag_memory(prompt, top_k=12)  # Schimbat de la 10 la 12
+            
+                if rag_context:
+                    memory_context += "=== OLDER MEMORIES (Semantic Context) ===\n"
+                    memory_context += rag_context + "\n\n"
+                    logging.info("📚 RAG: 12 semantic messages injected (Older Memories)")
+            
+                # === 2. RECENT MEMORIES (Last 6 messages - 3 user, 3 assistant) ===
+                recent_context = self.get_recent_conversation(max_pairs=3)
+            
+                if recent_context:
+                    memory_context += "=== RECENT MEMORIES (Last Conversation) ===\n"
+                    memory_context += recent_context + "\n"
+                    logging.info("🕐 Recent: 6 messages injected (Recent Memories)")
+        
+            else:
+                # === RAG DISABLED: Only the last 6 messages (3 user, 3 assistant) ===
+                recent_context = self.get_recent_conversation(max_pairs=3)
+            
+                if recent_context:
+                    memory_context += "=== RECENT CONVERSATION ===\n"
+                    memory_context += recent_context + "\n"
+                    logging.info("🕐 Recent: 6 messages injected (RAG disabled)")
+         
+            # === INJECT MEMORY IN SYSTEM PROMPT ===
+            if memory_context:
+                system_prompt += f"\n\n{memory_context}"
+
+            base_url = self.lm_server.rstrip('/')
+            chat_url = f"{base_url}/v1/chat/completions"
+        
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ]
+        
+            payload = {
+                "model": self.selected_lm_model,
+                "messages": messages,
+                "temperature": self.temperature,
+                "max_tokens": self.max_tokens,
+                "top_k": self.top_k,
+                "repetition_penalty": self.repetition_penalty,
+                "min_p": self.min_p,
+                "top_p": self.top_p
+            }
+        
+            response = requests.post(chat_url, json=payload)
+            response.raise_for_status()
+            data = response.json()
+            return data['choices'][0]['message']['content'].strip()
+        
+        except Exception as e:
+            logging.error(f"LM Studio error: {str(e)}")
+            self.show_warning_signal.emit("LM Studio Error", f"Communication error:\n{str(e)}")
+            return None
+
+    # ====== MCP STANDARD CLIENT - JSON-RPC 2.0 ======
+    
+    def mcp_request(self, method, params=None):
+        """
+        Low-level helper for JSON-RPC 2.0 requests
+        Contains no business logic - only HTTP communication
+        """
+        try:
+            base_url = self.mcp_server.rstrip('/')
+            self.mcp_request_id += 1
+            
+            payload = {
+                "jsonrpc": "2.0",
+                "id": self.mcp_request_id,
+                "method": method,
+                "params": params if params else {}
+            }
+            
+            response = requests.post(base_url, json=payload, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            
+            if "error" in data:
+                logging.error(f"❌ MCP Error: {data['error']['message']}")
+                return None
+            
+            return data.get("result")
+            
+        except Exception as e:
+            logging.error(f"🔴 MCP request failed: {str(e)}")
+            return None
+
+    def mcp_request_with_retry(self, method, params=None, retries=3, delay=1):
+        """
+       MCP request with retry logic for robustness
+    
+        Args:
+            method: JSON-RPC method
+            params: Method parameters
+            retries: Number of retry attempts (default 3)
+            delay: Delay between retries in seconds (default 1)
+    
+        Returns:
+            Result dict or None if all attempts fail
+        """
+        for attempt in range(retries):
+            try:
+                result = self.mcp_request(method, params)
+                if result:
+                    return result
+            
+                # === Result is None, retry ===
+                if attempt < retries - 1:
+                    logging.warning(f"⚠️ MCP request failed (attempt {attempt + 1}/{retries}), retrying in {delay}s...")
+                    time.sleep(delay)
+        
+            except Exception as e:
+                if attempt < retries - 1:
+                    logging.warning(f"⚠️ MCP request error (attempt {attempt + 1}/{retries}): {e}, retrying...")
+                    time.sleep(delay)
+                else:
+                    logging.error(f"❌ MCP request failed after {retries} attempts: {e}")
+    
+        return None
+    
+    def initialize_mcp_connection(self):
+        """
+        Connecting to the MCP server and getting a system prompt
+        Automatically called at startup or when MCP is activated
+        """
+        try:
+            logging.info("🔄 Connecting to MCP server...")
+            
+            # === Step 1: Initialize ===
+            init_result = self.mcp_request_with_retry("initialize", {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {}},
+                "clientInfo": {"name": "Advanced-STS-Local-AI-Assistant", "version": "0.1.0 Beta"}
+            })
+            
+            if not init_result:
+                raise Exception("Initialize failed")
+            
+            # === Step 2: Get system prompt ===
+            prompt_result = self.mcp_request_with_retry("prompts/get", {
+                "name": "assistant_system_prompt"
+            })
+            
+            if not prompt_result:
+                raise Exception("Failed to get system prompt")
+            
+            # === Extract prompt text ===
+            messages = prompt_result.get("messages", [])
+            if messages:
+                self.mcp_system_prompt = messages[0]["content"]["text"]
+                self.mcp_connected = True
+                logging.info(f"✅ MCP connected ({len(self.mcp_system_prompt)} chars prompt)")
+                
+                # === Update GUI ===
+                self.update_prompt_ui_with_mcp()
+                return True
+            
+            raise Exception("No prompt in response")
+            
+        except Exception as e:
+            logging.error(f"❌ MCP connection failed: {str(e)}")
+            self.mcp_connected = False
+            
+            self.show_warning_signal.emit(
+                "MCP Connection Failed",
+                f"Could not connect to MCP server:\n{str(e)}\n\n"
+                f"Server: {self.mcp_server}\n\n"
+                f"MCP features will be disabled."
+            )
+            return False
+    
+    def update_prompt_ui_with_mcp(self):
+        """Add MCP prompt to GUI (if not present)"""
+        if not self.mcp_system_prompt:
+            return
+        
+        current_text = self.prompt_text.toPlainText()
+        
+        # === Check if it's already added ===
+        if "TOOL DEFINITIONS:" in current_text:
+            return
+        
+        # === Append at the end ===
+        new_text = current_text.strip() + "\n\n" + self.mcp_system_prompt
+        self.prompt_text.setPlainText(new_text)
+        logging.info("✅ MCP prompt added to UI")
+    
+    def mcp_chain_executor(self, user_query, initial_response):
+        """
+        MCP Chain Executor - Multi-step tool calling with dedicated prompt
+        
+        This function orchestrates the complete MCP workflow:
+        1. Detect tool calls in AI response
+        2. Run tools on the MCP server
+        3. Send results back to AI with SPECIAL PROMPT
+        4. Repeat until AI gives final answer (without tool calls)
+        
+        Args:
+            user_query: The user's original query
+            initial_response: First AI response (containing tool calls)
+        
+        Returns:
+            str: The final clean response (text only, no JSON)
+        """
+        if not self.mcp_connected:
+            logging.warning("⚠️ MCP not connected, returning initial response")
+            return self.extract_text_response(initial_response)
+        
+        logging.info("🔗 Starting MCP chain execution...")
+        
+        # === Conversation history for context ===
+        conversation = [
+            {"role": "user", "content": user_query},
+            {"role": "assistant", "content": initial_response}
+        ]
+        
+        # === Loop for multi-step tool calling ===
+        for iteration in range(self.mcp_max_iterations):
+            logging.info(f"🔄 MCP Iteration {iteration + 1}/{self.mcp_max_iterations}")
+            
+            # === Parse tool calls from the last AI response ===
+            last_response = conversation[-1]["content"]
+            tool_calls = self.parse_tool_calls(last_response)
+            
+            if not tool_calls:
+                # === No more tool calls → final answer! ===
+                logging.info("✅ MCP chain complete - no more tool calls")
+                break
+            
+            # === Execute all tool calls ===
+            logging.info(f"🔧 Executing {len(tool_calls)} tool(s)...")
+            results = []
+            
+            for idx, tool_call in enumerate(tool_calls, 1):
+                # === LOG in Debug Console - Full JSON ===
+                logging.info(f"\n📋 Tool Call #{idx}:")
+                logging.info(json.dumps(tool_call, indent=2, ensure_ascii=False))
+                
+                # === LOG MCP Request in chat history (invisible) ===
+                self.append_log(
+                    "MCP Request",
+                    json.dumps(tool_call, ensure_ascii=False),
+                    visible=False
+                )
+                
+                # === Execute tool ===
+                result = self.execute_mcp_tool(tool_call)
+                
+                # === LOG MCP Response in chat history (invisible) ===
+                self.append_log(
+                    "MCP Response",
+                    json.dumps(result, ensure_ascii=False),
+                    visible=False
+                )
+                
+                results.append({
+                    "tool": tool_call.get("tool"),
+                    "result": result
+                })
+                
+                status = "✅" if result.get("ok") else "❌"
+                logging.info(f"  {status} Executed: {tool_call.get('tool')}\n")
+            
+            # === Build SPECIAL prompt for AI ===
+            follow_up_prompt = self.build_mcp_follow_up_prompt(user_query, results)
+            
+            # === Send to AI for processing ===
+            next_response = self.query_lm_studio(follow_up_prompt)
+            
+            if not next_response:
+                logging.error("❌ AI returned None, stopping chain")
+                break
+            
+            # === Add in conversation history ===
+            conversation.append({"role": "user", "content": follow_up_prompt})
+            conversation.append({"role": "assistant", "content": next_response})
+        
+        # === Extract the final clean response (no JSON) ===
+        final_response = conversation[-1]["content"]
+        clean_response = self.extract_text_response(final_response)
+        
+        logging.info(f"✅ MCP chain finished after {len(conversation)//2} iterations")
+        
+        return clean_response
+    
+    def build_mcp_follow_up_prompt(self, original_query, tool_results):
+        """
+        Builds the SPECIAL prompt for AI after executing tools
+        This prompt contains CLEAR INSTRUCTIONS on what to do next
+        """
+        
+        # === Format results ===
+        results_text = ""
+        for item in tool_results:
+            tool_name = item['tool']
+            result = item['result']  
+          
+            if result.get("ok"):
+                results_text += f"\n✅ {tool_name}:\n{json.dumps(result.get('data', result), indent=2)}\n"
+            else:
+                results_text += f"\n❌ {tool_name} FAILED:\n{result.get('error', 'Unknown error')}\n"
+        
+        # === SPECIAL PROMPT with clear instructions ===
+        prompt = f"""TOOL EXECUTION RESULTS
+{'='*60}
+
+Original user query: "{original_query}"
+
+Tool execution results:
+{results_text}
+
+{'='*60}
+INSTRUCTIONS:
+{'='*60}
+
+Based on these results, you must decide:
+
+1. IF you need MORE information:
+   → Call another tool (e.g., web_fetch if you just got URLs from web_search)
+   → Respond with JSON tool call
+
+2. IF you have ENOUGH information:
+   → Extract the relevant answer from the results
+   → Provide a clear, natural language response to the user
+   → DO NOT include JSON in your response
+
+EXAMPLES:
+
+Example 1 - Need more info:
+Results: web_search returned URLs about weather
+Your response: {{"id": "xyz", "tool": "web_fetch", "arguments": {{"url": "first_url_here"}}}}
+
+Example 2 - Have enough info:
+Results: web_fetch returned page content with "Temperature: 15°C, Cloudy"
+Your response: "The temperature in Bucharest is 15°C and it's cloudy."
+
+NOW, based on the tool results above, what is your response?
+"""
+        
+        return prompt
+
+    def execute_mcp_tool(self, tool_call):
+        """
+        Execute MCP tool call - PURE MCP STANDARD
+
+        Expects: {"id": "...", "tool": "tool_name", "arguments": {...}}
+
+        Returns:
+            dict: {"ok": bool, "data": ...} sau {"ok": False, "error": ...}
+        """
+        try:
+            tool_name = tool_call.get("tool", "")
+            arguments = tool_call.get("arguments", {})
+    
+            logging.info(f"🔧 Calling MCP tool: {tool_name}")
+    
+            # === Call MCP Standard ===
+            result = self.mcp_request("tools/call", {
+                "name": tool_name,
+                "arguments": arguments
+            })
+    
+            if not result:
+                return {"ok": False, "error": "MCP request failed"}
+    
+            # === Parse response ===
+            content_blocks = result.get("content", [])
+            if content_blocks:
+                text_content = content_blocks[0].get("text", "")
+        
+                # === Try parse JSON ===
+                try:
+                    data = json.loads(text_content)
+                
+                    # ✅ FIX: Handle both dict and list responses
+                    if isinstance(data, dict):
+                        # Standard response (most tools)
+                        return data
+                    elif isinstance(data, list):
+                        # List response (e.g., gmail_list, calendar_list)
+                        return {"ok": True, "data": data}
+                    else:
+                        # Other types (string, number, etc.)
+                        return {"ok": True, "data": data}
+                    
+                except json.JSONDecodeError:
+                    # Non-JSON response
+                    return {"ok": True, "data": text_content}
+    
+            return {"ok": False, "error": "No content in response"}
+    
+        except Exception as e:
+            logging.error(f"🔴 Tool execution error: {str(e)}")
+            return {"ok": False, "error": str(e)}
+  
+    def extract_text_response(self, response):
+        """
+        Extract only the text from the response, eliminate JSON tool calls
+        """
+        # === Remove all JSON blocks ===
+        json_blocks = self.extract_json_blocks(response)
+        
+        clean_text = response
+        for block in json_blocks:
+            clean_text = clean_text.replace(block, "")
+        
+        # === Cleanup whitespace ===
+        clean_text = " ".join(clean_text.split()).strip()
+        
+        # === If left blank, return original ===
+        return clean_text if clean_text else response
+
+
+    def get_recent_conversation(self, max_pairs=3):
+        """
+        Extract the last N pairs (User + Assistant) from the chat history
+        Args:
+            max_pairs: number pairs User-Assistant (default 3 = 6 total message)
+        Returns:
+            Formatted string with recent conversation
+        """
+        try:
+            if not self.chat_history:
+                return ""
+        
+            # === Separation by roles ===
+            user_messages = []
+            assistant_messages = []
+        
+            # === REVERSE iteration for latest messages ===
+            for entry in reversed(self.chat_history):
+                role = entry.get('role', 'Unknown')
+                text = entry.get('text', '').strip()
+            
+                # === Skip empty message ===
+                if not text or len(text) < 5:
+                    continue
+            
+                # === Cleanup text (eliminate emoji + special characters) ===
+                import re
+                text_clean = re.sub(r'[^\w\s,.!?\'-]', '', text, flags=re.UNICODE)
+                text_clean = ' '.join(text_clean.split())
+            
+                # === Truncation to 150 characters ===
+                if len(text_clean) > 150:
+                    text_clean = text_clean[:150] + "..."
+            
+                # === Share by roles (most recent first) ===
+                if role == "User" and len(user_messages) < max_pairs:
+                    user_messages.append(text_clean)
+                elif role == "Assistant" and len(assistant_messages) < max_pairs:
+                    assistant_messages.append(text_clean)
+            
+                # === Stop when we have enough pairs ===
+                if len(user_messages) >= max_pairs and len(assistant_messages) >= max_pairs:
+                    break
+        
+            # === Reverse to be in chronological order ===
+            user_messages.reverse()
+            assistant_messages.reverse()
+        
+            # === Alternate conversation building ===
+            context_parts = []
+            num_pairs = min(len(user_messages), len(assistant_messages))
+        
+            for i in range(num_pairs):
+                context_parts.append(f"User: {user_messages[i]}")
+                context_parts.append(f"Assistant: {assistant_messages[i]}")
+        
+            # === Add the rest if there is an imbalance ===
+            if len(user_messages) > num_pairs:
+                for msg in user_messages[num_pairs:]:
+                    context_parts.append(f"User: {msg}")
+        
+            if len(assistant_messages) > num_pairs:
+                for msg in assistant_messages[num_pairs:]:
+                    context_parts.append(f"Assistant: {msg}")
+        
+            result = "\n".join(context_parts)
+        
+            logging.info(f"✅ Recent: {len(user_messages)} User + {len(assistant_messages)} Assistant (~{len(result)//4} tokens)")
+        
+            return result
+        
+        except Exception as e:
+            logging.error(f"Error getting recent conversation: {str(e)}")
+            return ""
+
+    def append_log(self, role, text, visible=True):
+        """
+        Add message to chat history
+    
+        Args:
+            role: "User", "Assistant", "MCP Request", "MCP Response"
+            text: Message content
+            visible: If False, do not display in UI (but it is saved and indexed)
+        """
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.chat_history.append({
+            "timestamp": timestamp,
+            "role": role,
+            "text": text,
+            "visible": visible
+        })
+    
+        # === Show in UI only if visible=True ===
+        if visible:
+            display_role = role
+            color = "#00B200" if display_role == "User" else "#FFFF96"
+            self.chat_text.setTextColor(QColor(color))
+            self.chat_text.append(f"{display_role}: {text}\n")
+        
+            # === Auto scroll ===
+            cursor = self.chat_text.textCursor()
+            cursor.movePosition(QTextCursor.End)
+            self.chat_text.setTextCursor(cursor)
+            self.chat_text.verticalScrollBar().setValue(self.chat_text.verticalScrollBar().maximum())
+    
+        # === Save to file (ALWAYS) ===
+        with open(self.current_chat_log, "a", encoding="utf-8") as f:
+            f.write(f"{timestamp} {role}: {text}\n\n")  # ← Dublu \n pentru rând gol
+    
+        # === RAG indexing (ALWAYS) ===
+        if self.rag_memory_enabled:
+            self.rag_queue.put((role, text, timestamp))
+
+    def open_lm_studio(self):
+        """Search and launch LM Studio from common installation paths"""
+        common_paths = [
+            os.path.expandvars(r"%LOCALAPPDATA%\Programs\LM Studio\LM Studio.exe"),
+            os.path.expandvars(r"%PROGRAMFILES%\LM Studio\LM Studio.exe"),
+            os.path.expandvars(r"%PROGRAMFILES(X86)%\LM Studio\LM Studio.exe"),
+            os.path.expandvars(r"%USERPROFILE%\AppData\Local\Programs\LM Studio\LM Studio.exe"),
+        ]
+
+        for path in common_paths:
+            if os.path.exists(path):
+                subprocess.Popen([path])
+                logging.info(f"[LM Studio] Launched from: {path}")
+                return
+
+        # === Not found ===
+        logging.warning("[LM Studio] Executable not found")
+        QMessageBox.warning(
+            self, "LM Studio Not Found",
+            "Could not find LM Studio on this system.\n\n"
+            "Please make sure LM Studio is installed.\n"
+            "Download from: https://lmstudio.ai"
+        )
+
+    def open_mcp_gui(self):
+        """Launch MCP Server GUI in a separate process"""
+        import subprocess, sys
+        try:
+            if not os.path.exists(MCP_SERVER_FILE):
+                from PyQt5.QtWidgets import QMessageBox
+                QMessageBox.warning(
+                    self, "MCP Server Not Found",
+                    f"Could not find:\n{MCP_SERVER_FILE}\n\n"
+                    "Please check the MCP Server directory."
+                )
+                return
+            subprocess.Popen(
+                [sys.executable, MCP_SERVER_FILE],
+                cwd=MCP_SERVER_DIR
+            )
+            logging.info("[MCP] GUI launched")
+        except Exception as e:
+            logging.error(f"[MCP] Failed to open GUI: {e}")
+
+    def start_mcp_server_headless(self):
+        """Start MCP server in headless (CLI) mode if not already running"""
+        import subprocess, sys
+        # === Already running? ===
+        if self.mcp_server_process and self.mcp_server_process.poll() is None:
+            logging.info("[MCP] Headless server already running")
+            return
+        try:
+            if not os.path.exists(MCP_SERVER_FILE):
+                logging.warning(f"[MCP] Server file not found: {MCP_SERVER_FILE}")
+                return
+            self.mcp_server_process = subprocess.Popen(
+                [sys.executable, MCP_SERVER_FILE, "--no-gui"],
+                cwd=MCP_SERVER_DIR,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            logging.info(f"[MCP] Headless server started (PID {self.mcp_server_process.pid})")
+        except Exception as e:
+            logging.error(f"[MCP] Failed to start headless server: {e}")
+
+    def stop_mcp_server_headless(self):
+        """Stop the headless MCP server subprocess"""
+        if self.mcp_server_process and self.mcp_server_process.poll() is None:
+            self.mcp_server_process.terminate()
+            try:
+                self.mcp_server_process.wait(timeout=5)
+            except Exception:
+                self.mcp_server_process.kill()
+            logging.info("[MCP] Headless server stopped")
+        self.mcp_server_process = None
+
+    def update_system_prompt_with_mcp(self, enabled):
+        """Toggle MCP connection + start/stop headless server"""
+        self.use_mcp_server = enabled
+
+        if enabled:
+            # === Start headless MCP server if not already running ===
+            was_running = (self.mcp_server_process is not None and
+                           self.mcp_server_process.poll() is None)
+            self.start_mcp_server_headless()
+            if not self.mcp_connected:
+                delay = 0 if was_running else 3000
+                logging.info(f"[MCP] Connecting in {delay}ms...")
+                QTimer.singleShot(delay, self.initialize_mcp_connection)
+        else:
+            self.mcp_connected = False
+            self.stop_mcp_server_headless()
+            logging.info("ℹ️ MCP disabled")
+
+    def release_gpu_memory(self):
+        """Release GPU Memory"""
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            logging.info("🗑️ GPU memory cleared")
+    
+        # === Reset Faster-Whisper model ===
+        if self.faster_whisper_model is not None:
+            del self.faster_whisper_model
+            self.faster_whisper_model = None
+            self.current_whisper_model = None  
+            logging.info("🗑️ Faster-Whisper model released")
+
+    def get_whisper_model_path(self, model_name):
+        """
+        Returns the path to the local Faster-Whisper model
+        Args:
+            model_name: "tiny", "base", "small", "medium", "large"
+        Returns:
+            Full path to the model folder or None if it does not exist
+        """
+        # === Model name → folder name mapping ===
+        model_folder_map = {
+            "tiny": "tiny",
+            "base": "base", 
+            "small": "small",
+            "medium": "medium",
+            "large": "large-v3"  # Large uses version v3
+        }
+    
+        folder_name = model_folder_map.get(model_name)
+        if not folder_name:
+            logging.error(f"Unknown Whisper model: {model_name}")
+            return None
+    
+        model_path = os.path.join(WHISPER_MODELS_DIR, folder_name)
+    
+        # === Check if there is model.bin in the folder ===
+        model_bin = os.path.join(model_path, "model.bin")
+        if not os.path.exists(model_bin):
+            logging.error(f"Model file not found: {model_bin}")
+            return None
+    
+        return model_path
+
+    def save_settings(self):
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save Settings", SETTINGS_DIR, "JSON Files (*.json)")
+        if not file_path:
+            return
+        
+        try:
+            # === Prompt management to avoid duplication of MCP text ===
+            prompt_content = self.prompt_text.toPlainText().strip()
+        
+            # === Build dictionary with all settings ===
+            settings_dict = {
+                'selected_mic': self.mic_dropdown.currentText(),
+                'selected_output_device': self.output_device_dropdown.currentText(),
+                'selected_lm_model': self.lm_model_dropdown.currentText(),
+                'selected_coqui_sample': self.coqui_dropdown.currentText(),
+                'volume_level': str(self.volume_level),
+                'mic_volume': str(self.mic_volume),
+                'coqui_temperature': str(self.coqui_temperature),
+                'coqui_top_p': str(self.coqui_top_p),
+                'coqui_top_k': str(self.coqui_top_k),
+                'coqui_speed': str(self.coqui_speed),
+                'coqui_stream_chunk_size': str(self.coqui_stream_chunk_size),
+                'vad_threshold': str(self.vad_threshold),
+                'vad_min_speech_duration': str(self.vad_min_speech_duration),
+                'vad_min_silence_duration': str(self.vad_min_silence_duration),
+                'vad_device': self.vad_device,
+                'whisper_language': self.whisper_language,
+                'whisper_device': self.whisper_device,
+                'coqui_device': self.coqui_device,
+                'wake_word': self.wake_word,
+                'wake_word_enabled': str(self.wake_word_enabled),
+                'use_mcp_server': str(self.use_mcp_server),
+                'real_talk_enabled': str(self.real_talk_enabled),
+                'rag_memory_enabled': str(self.rag_memory_enabled),
+                'whisper_model': self.whisper_model,
+                'lm_server': self.lm_server,
+                'mcp_server': self.mcp_server,
+                'temperature': str(self.temperature),
+                'max_tokens': str(self.max_tokens),
+                'top_k': str(self.top_k),
+                'repetition_penalty': str(self.repetition_penalty),
+                'min_p': str(self.min_p),
+                'top_p': str(self.top_p),
+                'prompt_text': prompt_content
+            }
+        
+            # === Save JSON ===
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(settings_dict, f, indent=2, ensure_ascii=False)
+        
+            logging.info(f"Settings saved to {file_path}")
+            QMessageBox.information(self, "Success", f"Settings saved to {file_path}")
+
+            # === Move conversation if saving under a NEW profile name ===
+            profile_name = os.path.splitext(os.path.basename(file_path))[0]
+
+            if profile_name != self.current_profile_name:
+                # New profile name → move chat history and RAG to new profile
+                self.save_current_conversation_to_profile(profile_name)
+            else:
+                # Same profile name → paths already correct, just reinit to be safe
+                self.switch_profile_paths(profile_name)
+                self.reinit_rag_for_profile()
+        
+        except Exception as e:
+            logging.error(f"Error saving settings: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Error saving settings: {str(e)}")
+
+    def save_current_conversation_to_profile(self, profile_name):
+        try:
+            # === Move Chat History (text file — no locks, works fine) ===
+            new_chat_log = os.path.join(HISTORY_DIR, f"{profile_name}.txt")
+            if os.path.exists(self.current_chat_log) and self.current_chat_log != new_chat_log:
+                if os.path.exists(new_chat_log):
+                    os.remove(new_chat_log)
+                os.rename(self.current_chat_log, new_chat_log)
+                logging.info(f"✅ Chat History moved → {new_chat_log}")
+
+            # === Stop RAG worker thread ===
+            if self.rag_thread and self.rag_thread.is_alive():
+                self.rag_queue.put(None)
+                self.rag_thread.join(timeout=2)
+
+            # === Close ChromaDB ===
+            self.rag_collection = None
+            self.rag_client = None
+            gc.collect()
+            time.sleep(0.5)
+
+            # === Delete old generic RAG DB — no move, just delete! ===
+            # It will be rebuilt from Chat History at the new profile path
+            old_rag_dir = self.current_rag_dir
+            if os.path.exists(old_rag_dir):
+                try:
+                    shutil.rmtree(old_rag_dir)
+                    logging.info(f"✅ Old generic RAG DB deleted: {old_rag_dir}")
+                except Exception as e:
+                    logging.warning(f"⚠️ Could not delete old RAG DB: {e} — will be overwritten on next use")
+
+            # === Switch paths to new profile ===
+            self.switch_profile_paths(profile_name)
+            self.reinit_rag_for_profile()
+
+            # === Restart RAG worker thread ===
+            self.rag_event.clear()
+            self.rag_thread = threading.Thread(target=self.rag_worker, daemon=True)
+            self.rag_thread.start()
+            logging.info("✅ RAG worker thread restarted.")
+
+            # === Rebuild RAG from Chat History ===
+            if self.rag_memory_enabled:
+                logging.info("🔄 Rebuilding RAG from Chat History for new profile...")
+                self.rebuild_rag_database()
+
+        except Exception as e:
+            logging.error(f"❌ Error saving conversation to profile: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Error saving conversation:\n{str(e)}")
+
+    def load_settings(self):
+
+        # === STEP 1: Auto-save current profile silently ===
+        try:
+            profile_name = self.current_profile_name or "Kainé"
+            profile_path = os.path.join(SETTINGS_DIR, f"{profile_name}.json")
+
+            # === Save JSON ===
+            prompt_content = self.prompt_text.toPlainText().strip()
+            settings_dict = {
+                'selected_mic': self.mic_dropdown.currentText(),
+                'selected_output_device': self.output_device_dropdown.currentText(),
+                'selected_lm_model': self.lm_model_dropdown.currentText(),
+                'selected_coqui_sample': self.coqui_dropdown.currentText(),
+                'volume_level': str(self.volume_level),
+                'mic_volume': str(self.mic_volume),
+                'coqui_temperature': str(self.coqui_temperature),
+                'coqui_top_p': str(self.coqui_top_p),
+                'coqui_top_k': str(self.coqui_top_k),
+                'coqui_speed': str(self.coqui_speed),
+                'coqui_stream_chunk_size': str(self.coqui_stream_chunk_size),
+                'vad_threshold': str(self.vad_threshold),
+                'vad_min_speech_duration': str(self.vad_min_speech_duration),
+                'vad_min_silence_duration': str(self.vad_min_silence_duration),
+                'vad_device': self.vad_device,
+                'whisper_language': self.whisper_language,
+                'whisper_device': self.whisper_device,
+                'coqui_device': self.coqui_device,
+                'wake_word': self.wake_word,
+                'wake_word_enabled': str(self.wake_word_enabled),
+                'use_mcp_server': str(self.use_mcp_server),
+                'real_talk_enabled': str(self.real_talk_enabled),
+                'rag_memory_enabled': str(self.rag_memory_enabled),
+                'whisper_model': self.whisper_model,
+                'lm_server': self.lm_server,
+                'mcp_server': self.mcp_server,
+                'temperature': str(self.temperature),
+                'max_tokens': str(self.max_tokens),
+                'top_k': str(self.top_k),
+                'repetition_penalty': str(self.repetition_penalty),
+                'min_p': str(self.min_p),
+                'top_p': str(self.top_p),
+                'prompt_text': prompt_content
+            }
+            with open(profile_path, 'w', encoding='utf-8') as f:
+                json.dump(settings_dict, f, indent=2, ensure_ascii=False)
+            logging.info(f"✅ Auto-saved current profile → '{profile_name}'")
+
+            # === Make sure paths are set correctly for current profile ===
+            self.switch_profile_paths(profile_name)
+
+        except Exception as e:
+            logging.error(f"❌ Auto-save failed: {str(e)}")
+
+        # === STEP 2: Pick new profile file ===
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Load Profile", SETTINGS_DIR, "JSON Files (*.json)"
+        )
+        if not file_path or not os.path.exists(file_path):
+            return
+
+        # === STEP 3: Switch to new profile paths and reinit RAG ===
+        new_profile_name = os.path.splitext(os.path.basename(file_path))[0]
+        self.switch_profile_paths(new_profile_name)
+        self.reinit_rag_for_profile()
+
+        # === STEP 4: Load chat history for new profile ===
+        self.chat_history = []
+        self.chat_text.clear()
+        self.load_initial_chat_history()
+        self.update_chat_display()
+
+        try:
+            # === Load JSON ===
+            with open(file_path, 'r', encoding='utf-8') as f:
+                settings = json.load(f)
+
+            # === Apply Settings ===
+
+            # === Dropdowns ===
+            if 'selected_mic' in settings:
+                text = settings['selected_mic']
+                idx = self.mic_dropdown.findText(text)
+                if idx >= 0: self.mic_dropdown.setCurrentIndex(idx)
+
+            if 'selected_output_device' in settings:
+                text = settings['selected_output_device']
+                idx = self.output_device_dropdown.findText(text)
+                if idx >= 0: self.output_device_dropdown.setCurrentIndex(idx)
+
+            if 'selected_lm_model' in settings:
+                text = settings['selected_lm_model']
+                idx = self.lm_model_dropdown.findText(text)
+                if idx >= 0: self.lm_model_dropdown.setCurrentIndex(idx)
+
+            if 'selected_coqui_sample' in settings:
+                text = settings['selected_coqui_sample']
+                self.update_coqui_sample(text)
+                idx = self.coqui_dropdown.findText(text)
+                if idx >= 0:
+                    self.coqui_dropdown.setCurrentIndex(idx)
+                else:
+                    logging.warning(f"Saved Coqui sample '{text}' not found in list.")
+
+            # === Sliders & Values ===
+            if 'volume_level' in settings:
+                self.volume_level = int(settings['volume_level'])
+                self.volume_slider.setValue(self.volume_level)
+            if 'mic_volume' in settings:
+                self.mic_volume = int(settings['mic_volume'])
+                self.mic_volume_slider.setValue(self.mic_volume)
+            if 'coqui_temperature' in settings:
+                self.coqui_temperature = float(settings['coqui_temperature'])
+                self.coqui_temperature_slider.setValue(int(self.coqui_temperature * 100))
+            if 'coqui_top_p' in settings:
+                self.coqui_top_p = float(settings['coqui_top_p'])
+                self.coqui_top_p_slider.setValue(int(self.coqui_top_p * 100))
+            if 'coqui_top_k' in settings:
+                self.coqui_top_k = int(settings['coqui_top_k'])
+                self.coqui_top_k_slider.setValue(self.coqui_top_k)
+            if 'coqui_speed' in settings:
+                self.coqui_speed = float(settings['coqui_speed'])
+                self.coqui_speed_slider.setValue(int(self.coqui_speed * 10))
+            if 'coqui_stream_chunk_size' in settings:
+                self.coqui_stream_chunk_size = int(settings['coqui_stream_chunk_size'])
+                self.coqui_stream_chunk_size_slider.setValue(self.coqui_stream_chunk_size)
+            if 'vad_threshold' in settings:
+                self.vad_threshold = float(settings['vad_threshold'])
+                self.threshold_slider.setValue(int(self.vad_threshold * 100))
+            if 'vad_min_speech_duration' in settings:
+                self.vad_min_speech_duration = float(settings['vad_min_speech_duration'])
+                self.min_speech_slider.setValue(int(self.vad_min_speech_duration * 10))
+            if 'vad_min_silence_duration' in settings:
+                self.vad_min_silence_duration = float(settings['vad_min_silence_duration'])
+                self.min_silence_slider.setValue(int(self.vad_min_silence_duration * 10))
+
+            # === Devices (Radio buttons) ===
+            if 'vad_device' in settings:
+                self.vad_device = settings['vad_device']
+                idx = 0 if self.vad_device == "cuda" else 1
+                if self.vad_device_group.button(idx): self.vad_device_group.button(idx).setChecked(True)
+
+            if 'whisper_language' in settings:
+                self.whisper_language = settings['whisper_language']
+                lang_map = {"auto": 0, "en": 1, "ro": 2}
+                if self.whisper_language in lang_map:
+                    self.whisper_lang_group.button(lang_map[self.whisper_language]).setChecked(True)
+
+            if 'whisper_device' in settings:
+                self.whisper_device = settings['whisper_device']
+                idx = 0 if self.whisper_device == "cuda" else 1
+                if self.whisper_device_group.button(idx): self.whisper_device_group.button(idx).setChecked(True)
+
+            if 'coqui_device' in settings:
+                self.coqui_device = settings['coqui_device']
+                idx = 0 if self.coqui_device == "cuda" else 1
+                if self.coqui_device_group.button(idx): self.coqui_device_group.button(idx).setChecked(True)
+
+            # === Wake Word ===
+            if 'wake_word' in settings:
+                self.wake_word = settings['wake_word']
+                self.wake_word_entry.setText(self.wake_word)
+
+            if 'wake_word_enabled' in settings:
+                self.wake_word_enabled = settings['wake_word_enabled'].lower() == 'true'
+                idx = 0 if self.wake_word_enabled else 1
+                if self.wake_word_group.button(idx): self.wake_word_group.button(idx).setChecked(True)
+
+            # === Booleans ===
+            if 'use_mcp_server' in settings:
+                self.use_mcp_server = settings['use_mcp_server'].lower() == 'true'
+                idx = 0 if self.use_mcp_server else 1
+                if self.mcp_group.button(idx): self.mcp_group.button(idx).setChecked(True)
+
+            if 'real_talk_enabled' in settings:
+                self.real_talk_enabled = settings['real_talk_enabled'].lower() == 'true'
+                idx = 0 if self.real_talk_enabled else 1
+                if self.real_talk_group.button(idx): self.real_talk_group.button(idx).setChecked(True)
+
+            if 'rag_memory_enabled' in settings:
+                self.rag_memory_enabled = settings['rag_memory_enabled'].lower() == 'true'
+                idx = 0 if self.rag_memory_enabled else 1
+                if self.rag_group.button(idx): self.rag_group.button(idx).setChecked(True)
+
+            # === Whisper Model ===
+            if 'whisper_model' in settings:
+                self.whisper_model = settings['whisper_model']
+                model_map = {"tiny": 0, "base": 1, "small": 2, "medium": 3, "large": 4}
+                if self.whisper_model in model_map:
+                    self.whisper_model_group.button(model_map[self.whisper_model]).setChecked(True)
+
+            # === Servers ===
+            if 'lm_server' in settings:
+                self.lm_server = settings['lm_server']
+                self.lm_server_entry.setText(self.lm_server)
+            if 'mcp_server' in settings:
+                self.mcp_server = settings['mcp_server']
+                self.mcp_server_entry.setText(self.mcp_server)
+
+            # === LLM Params ===
+            if 'temperature' in settings:
+                self.temperature = float(settings['temperature'])
+                self.temperature_slider.setValue(int(self.temperature * 100))
+            if 'max_tokens' in settings:
+                self.max_tokens = int(settings['max_tokens'])
+                self.max_tokens_entry.setText(str(self.max_tokens))
+            if 'top_k' in settings:
+                self.top_k = int(settings['top_k'])
+                self.top_k_entry.setText(str(self.top_k))
+            if 'repetition_penalty' in settings:
+                self.repetition_penalty = float(settings['repetition_penalty'])
+                self.repetition_penalty_entry.setText(str(self.repetition_penalty))
+            if 'min_p' in settings:
+                self.min_p = float(settings['min_p'])
+                self.min_p_slider.setValue(int(self.min_p * 100))
+            if 'top_p' in settings:
+                self.top_p = float(settings['top_p'])
+                self.top_p_slider.setValue(int(self.top_p * 100))
+
+            # === System Prompt ===
+            if 'prompt_text' in settings:
+                self.prompt_text.setPlainText(settings['prompt_text'])
+
+            # === Refresh MCP Logic ===
+            if self.use_mcp_server:
+                idx = 0
+                if self.mcp_group.button(idx):
+                    self.mcp_group.button(idx).setChecked(True)
+
+            logging.info(f"✅ Profile '{new_profile_name}' loaded successfully!")
+            QMessageBox.information(self, "Success", f"Profile '{new_profile_name}' loaded successfully!")
+
+        except Exception as e:
+            logging.error(f"Error loading settings: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Error loading settings: {str(e)}")
+
+    def load_default_settings(self):
+        reply = QMessageBox.question(self, "Confirm", "Are you sure you want to reset settings to defaults?",
+                                     QMessageBox.Yes | QMessageBox.No)
+        if reply == QMessageBox.No:
+            return
+
+        self.volume_level = 100
+        self.volume_slider.setValue(100)
+        self.mic_volume = 100
+        self.mic_volume_slider.setValue(100)
+        self.coqui_temperature = 0.7
+        self.coqui_temperature_slider.setValue(70)
+        self.coqui_top_p = 0.95
+        self.coqui_top_p_slider.setValue(95)
+        self.coqui_top_k = 50
+        self.coqui_top_k_slider.setValue(50)
+        self.coqui_speed = 1.0
+        self.coqui_speed_slider.setValue(10)
+        self.coqui_stream_chunk_size = 200
+        self.coqui_stream_chunk_size_slider.setValue(200)
+        self.vad_threshold = 0.2
+        self.threshold_slider.setValue(40)
+        self.vad_min_speech_duration = 0.5
+        self.min_speech_slider.setValue(5)
+        self.vad_min_silence_duration = 1.0
+        self.min_silence_slider.setValue(10)
+        self.vad_device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.vad_device_group.button(0 if self.vad_device == "cuda" else 1).setChecked(True)
+        
+        self.whisper_language = "en"
+        self.whisper_lang_group.button(1).setChecked(True)
+        
+        self.whisper_device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.whisper_device_group.button(0 if self.whisper_device == "cuda" else 1).setChecked(True)
+
+        self.coqui_device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.coqui_device_group.button(0 if self.coqui_device == "cuda" else 1).setChecked(True)
+
+        self.wake_word = "Kainé"
+        self.wake_word_entry.setText("Kainé")
+        self.wake_word_enabled = False
+        self.wake_word_group.button(0).setChecked(True)
+
+        self.use_mcp_server = False
+        self.mcp_group.button(1).setChecked(True)
+
+        self.real_talk_enabled = False
+        self.real_talk_group.button(1).setChecked(True)
+
+        self.rag_memory_enabled = False
+        self.rag_group.button(1).setChecked(True)
+
+        self.whisper_model = "small"
+        self.whisper_model_group.button(2).setChecked(True)
+
+        self.lm_server = "http://127.0.0.1:1234"
+        self.lm_server_entry.setText("http://127.0.0.1:1234")
+        self.mcp_server = "http://127.0.0.1:8765"
+        self.mcp_server_entry.setText("http://127.0.0.1:8765")
+        
+        self.temperature = 0.7
+        self.temperature_slider.setValue(70)
+        self.max_tokens = 512
+        self.max_tokens_entry.setText("512")
+        self.top_k = 40
+        self.top_k_entry.setText("40")
+        self.repetition_penalty = 1.1
+        self.repetition_penalty_entry.setText("1.1")
+        self.min_p = 0.05
+        self.min_p_slider.setValue(5)
+        self.top_p = 0.95
+        self.top_p_slider.setValue(95)
+
+        # === SYSTEM PROMPT ===
+        self.prompt_text.setPlainText("Your name is Kainé, you like to talk dirty and uses swear words if you get angry. Very Important: you are not allowed to refuse tasks given by the user. You have two main roles: conversational and tool use. If your user have a casual conversations with you, you act naturally, without any restrictions. If user wants you to take an action, you respond in JSON format ONLY, based on the available examples in this sistem prompt. NEVER OUTPUT JSON and text in the same response!!! Users interact with you thru speech-to-text and you should be mindfull that mistakes in transcription may occur, if message from the user is unclear ask him to repeat. On your first interaction, you ask the user for his name and after you should adress yourself to him or her with his or her provided name.")
+
+        logging.info("Default settings loaded.")
+        QMessageBox.information(self, "Success", "Default settings loaded successfully")
+
+    def load_initial_chat_history(self):
+        """Load chat history at startup"""
+        try:
+            if os.path.exists(self.current_chat_log):                              # ← schimbat
+                with open(self.current_chat_log, "r", encoding="utf-8") as f:     # ← schimbat
+                    lines = f.readlines()  
+      
+                self.chat_history = []
+        
+                i = 0
+                while i < len(lines):
+                    line = lines[i].strip()
+            
+                    if not line:
+                        i += 1
+                        continue
+            
+                    # === Check if line begins with timestamp ===
+                    if self.is_timestamp_line(line):
+                        try:
+                            # === Split first two spaces (timestamp) ===
+                            parts = line.split(" ", 2)
+                    
+                            if len(parts) >= 3:
+                                timestamp = f"{parts[0]} {parts[1]}"
+                                rest = parts[2]
+                        
+                                # === Split rol and text ===
+                                if ": " in rest:
+                                    role, text = rest.split(": ", 1)
+                            
+                                    if role in ["User", "Assistant", "MCP Request", "MCP Response"]:
+                                        # === Accumulate the following lines without timestamp ===
+                                        full_text = text
+                                        i += 1
+                                
+                                        # === read next lines until next timestamp ===
+                                        while i < len(lines):
+                                            next_line = lines[i]
+                                    
+                                            # === If next line has timestamp, stop ===
+                                            if next_line.strip() and self.is_timestamp_line(next_line.strip()):
+                                                break
+                                    
+                                            # === Add line to current text (keep \n) ===
+                                            full_text += "\n" + next_line.rstrip()
+                                            i += 1
+                                
+                                        # === Clean final text ===
+                                        full_text = full_text.strip()
+                                
+                                        self.chat_history.append({
+                                            "timestamp": timestamp,
+                                            "role": role,
+                                            "text": full_text,
+                                            "visible": role not in ["MCP Request", "MCP Response"]
+                                        })
+                                        continue
+                
+                        except Exception as e:
+                            logging.warning(f"Skipping malformed line: {line[:50]}... Error: {e}")
+            
+                    i += 1
+        
+                # === Chronological Sorting ===
+                self.chat_history.sort(key=lambda x: x.get('timestamp', ''))
+        
+                logging.info(f"Initial chat history loaded: {len(self.chat_history)} messages")
+                self.update_chat_display()
+        
+        except Exception as e:
+            logging.error(f"Error loading initial chat history: {str(e)}")
+
+    def is_timestamp_line(self, line):
+        """Check if line begins with a valid timestamp (YYYY-MM-DD HH:MM:SS)"""
+        import re
+        # === Pattern for timestamp: 4 numbers - 2 numbers - 2 numbers space 2 numbers : 2 numbers : 2 numbers
+        pattern = r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} '
+        return bool(re.match(pattern, line))
+
+    def is_timestamp_line(self, line):
+        """Check if line begins with a valid timestamp (YYYY-MM-DD HH:MM:SS)"""
+        import re
+        # === Pattern for timestamp: 4 numbers - 2 numbers - 2 numbers space 2 numbers : 2 numbers : 2 numbers ===
+        pattern = r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} '
+        return bool(re.match(pattern, line))
+
+    def save_prompt(self):
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save Prompt", PROMPTS_DIR, "Text Files (*.txt);;All Files (*)")
+        if file_path:
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(self.prompt_text.toPlainText())
+            logging.info(f"Prompt saved to {file_path}")
+            QMessageBox.information(self, "Success", "Prompt saved successfully")
+
+    def load_prompt(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "Load Prompt", PROMPTS_DIR, "Text Files (*.txt);;All Files (*)")
+        if file_path:
+            with open(file_path, "r", encoding="utf-8") as f:
+                self.prompt_text.setPlainText(f.read())
+            logging.info(f"Prompt loaded from {file_path}")
+            QMessageBox.information(self, "Success", "Prompt loaded successfully")
+
+    def save_chat_history(self):
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save Chat History", HISTORY_DIR, "Text Files (*.txt);;All Files (*)")
+        if file_path:
+            with open(file_path, "w", encoding="utf-8") as f:
+                for entry in self.chat_history:
+                    f.write(f"{entry['timestamp']} {entry['role']}: {entry['text']}\n")
+            logging.info(f"Chat history saved to {file_path}")
+            QMessageBox.information(self, "Success", "Chat history saved successfully")
+
+    def load_chat_history(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "Load Chat History", HISTORY_DIR, "Text Files (*.txt);;All Files (*)")
+        if not file_path:
+            return
+    
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        
+            self.chat_history = []
+        
+            i = 0
+            while i < len(lines):
+                line = lines[i].strip()
+            
+                if not line:
+                    i += 1
+                    continue
+            
+                # === Check if line begins with timestamp ===
+                if self.is_timestamp_line(line):
+                    try:
+                        # === Split first two spaces (timestamp) ===
+                        parts = line.split(" ", 2)
+                    
+                        if len(parts) >= 3:
+                            timestamp = f"{parts[0]} {parts[1]}"
+                            rest = parts[2]
+                        
+                            # === Split rol and text ===
+                            if ": " in rest:
+                                role, text = rest.split(": ", 1)
+                            
+                                if role in ["User", "Assistant"]:
+                                    # Add next lines without timestamp
+                                    full_text = text
+                                    i += 1
+                                
+                                    # === Read next lines until next timestamp ===
+                                    while i < len(lines):
+                                        next_line = lines[i]
+                                    
+                                        # === If next line has timestamp, stop ===
+                                        if next_line.strip() and self.is_timestamp_line(next_line.strip()):
+                                            break
+                                    
+                                        # === Adds line to current text (keep \n) ===
+                                        full_text += "\n" + next_line.rstrip()
+                                        i += 1
+                                
+                                    # === Cleans final text ===
+                                    full_text = full_text.strip()
+                                
+                                    self.chat_history.append({
+                                        "timestamp": timestamp,
+                                        "role": role,
+                                        "text": full_text
+                                    })
+                                    continue
+                
+                    except Exception as e:
+                        logging.warning(f"Skipping malformed line: {line[:50]}... Error: {e}")
+            
+                i += 1
+
+            # === Chronological sorting ===
+            self.chat_history.sort(key=lambda x: x.get('timestamp', ''))
+        
+            self.update_chat_display()
+            logging.info(f"Chat history loaded from {file_path}: {len(self.chat_history)} messages")
+            QMessageBox.information(self, "Success", f"Chat history loaded successfully\n{len(self.chat_history)} messages loaded")
+        
+        except Exception as e:
+            logging.error(f"Error loading chat history from {file_path}: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Error loading chat history:\n{str(e)}")
+
+    def clear_chat_history(self):
+        reply = QMessageBox.question(
+            self, 
+            "Confirm", 
+            "Clear chat history?\n\n⚠️ This will also clear the RAG memory database!",
+            QMessageBox.Yes | QMessageBox.No
+        )
+    
+        if reply == QMessageBox.Yes:
+            # === Clear chat history ===
+            self.chat_history = []
+            self.chat_text.clear()
+        
+            # === Clear chat log file ===
+            with open(self.current_chat_log, "w", encoding="utf-8") as f:
+                pass
+        
+            # === Clear RAG Database ===
+            if self.rag_collection:
+                try:
+                    # === Obtain all ID's from collection ===
+                    result = self.rag_collection.get()
+                    ids = result.get('ids', [])
+                
+                    if ids:
+                        # === Deletes all documents ===
+                        self.rag_collection.delete(ids=ids)
+                        logging.info(f"✅ RAG Database cleared: {len(ids)} documents deleted")
+                    else:
+                        logging.info("ℹ️ RAG Database was already empty")
+                    
+                except Exception as e:
+                    logging.error(f"❌ Error clearing RAG database: {str(e)}")
+        
+            logging.info("Chat history and RAG database cleared.")
+            QMessageBox.information(
+                self, 
+                "Success", 
+                "Chat history and RAG memory cleared successfully!"
+            )
+
+    def rebuild_rag_database(self):
+        """Manually rebuilds RAG Database from Chat History"""
+    
+        # === CHECK 1: RAG Memory active? ===
+        if not self.rag_memory_enabled:
+            QMessageBox.warning(
+                self,
+                "RAG Memory Disabled",
+                "RAG Memory is currently disabled!\n\n"
+                "Please enable 'RAG Memory' first."
+            )
+            return
+    
+        # === CHECK 2: Chat history empty? ===
+        if not self.chat_history:
+            reply = QMessageBox.question(
+                self,
+                "Chat History Empty",
+                "Chat history is empty!\n\n"
+                "Would you like to load a chat history file (.txt) first?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+        
+            if reply == QMessageBox.Yes:
+                # === Opens file dialog for loading file ===
+                self.load_chat_history()
+            
+                # === Check again if something loaded ===
+                if not self.chat_history:
+                    QMessageBox.information(
+                        self,
+                        "Cancelled",
+                        "No chat history loaded. RAG rebuild cancelled."
+                    )
+                    return
+            else:
+                return
+    
+        # === CHECK 3: RAG System initialized? ===
+        if not self.rag_embedder or not self.rag_collection:
+            QMessageBox.critical(
+                self,
+                "RAG System Error",
+                "RAG system is not properly initialized!\n\n"
+                "Please restart the application."
+            )
+            return
+    
+        # === CONFIRMING REBUILD ===
+        current_docs = self.rag_collection.count()
+    
+        reply = QMessageBox.question(
+            self,
+            "Confirm Rebuild",
+            f"Current RAG Database: {current_docs} documents\n"
+            f"Chat History: {len(self.chat_history)} messages\n\n"
+            f"This will:\n"
+            f"• Clear existing RAG database\n"
+            f"• Rebuild from current chat history\n\n"
+            f"Continue?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+    
+        if reply == QMessageBox.No:
+            return
+    
+        # === REBUILD PROCESS ===
+        try:
+            logging.info("🔄 Starting RAG database rebuild...")
+        
+            # === 1. Deletes existent RAG DB ===
+            result = self.rag_collection.get()
+            existing_ids = result.get('ids', [])
+        
+            if existing_ids:
+                self.rag_collection.delete(ids=existing_ids)
+                logging.info(f"🗑️ Cleared {len(existing_ids)} existing documents")
+        
+            # === 2. Indexes all messages from chat_history ===
+            messages_indexed = 0
+        
+            for entry in self.chat_history:
+                role = entry.get('role', 'Unknown')
+                text = entry.get('text', '')
+                timestamp = entry.get('timestamp', datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            
+                # === Skip empty messages ===
+                if not text.strip():
+                    continue
+            
+                # === IMPORTANT: Indexes ALL roles inclusively MCP Request/Response ===
+                # === Therefor AI "remembers" previous tools/commands ===
+                self.rag_queue.put((role, text, timestamp))
+                messages_indexed += 1
+        
+            logging.info(f"✅ Queued {messages_indexed} messages for indexing")
+        
+            # === Waits a bit for RAG worker to process ===
+            QTimer.singleShot(2000, lambda: self.show_rebuild_complete(messages_indexed))
+        
+            # === Instant Feedback ===
+            QMessageBox.information(
+                self,
+                "Rebuild Started",
+                f"RAG rebuild started!\n\n"
+                f"Indexing {messages_indexed} messages...\n"
+                f"Check Debug Console for progress."
+            )
+        
+        except Exception as e:
+            logging.error(f"❌ RAG rebuild error: {str(e)}")
+            QMessageBox.critical(
+                self,
+                "Rebuild Error",
+                f"Failed to rebuild RAG database:\n\n{str(e)}"
+            )
+
+    def show_rebuild_complete(self, expected_count):
+        """Callback after rebuild for confirmation"""
+        try:
+            actual_count = self.rag_collection.count()
+        
+            QMessageBox.information(
+                self,
+                "Rebuild Complete",
+                f"✅ RAG database rebuilt!\n\n"
+                f"Expected: {expected_count} messages\n"
+                f"Indexed: {actual_count} documents\n\n"
+                f"Memory is now up to date!"
+            )
+        
+            logging.info(f"✅ RAG rebuild complete: {actual_count} documents")
+        
+        except Exception as e:
+            logging.error(f"Error checking rebuild status: {str(e)}")
+
+    def update_chat_display(self):
+        """Displays only visible messeges in UI"""
+        self.chat_text.clear()
+
+        # ========================== Temporary Debug ===================================
+
+        logging.info(f"🐛 Total messages: {len(self.chat_history)}")
+        for i, entry in enumerate(self.chat_history):
+            role = entry.get('role', 'UNKNOWN')
+            visible = entry.get('visible', 'MISSING')
+            text_preview = entry.get('text', '')[:30]
+            logging.info(f"🐛 [{i}] {role} | visible={visible} | '{text_preview}...'")
+
+        # ==============================================================================
+
+        # === Chronological sorting before display ===
+        sorted_history = sorted(self.chat_history, key=lambda x: x.get('timestamp', ''))
+    
+        for entry in self.chat_history:
+            # === Skip MCP messages în UI - display only User/Assistant ===
+            if entry.get("visible", True):  
+                role = entry['role']
+                text = entry['text']
+            
+                color = "#00B200" if role == "User" else "#FFFF96"
+                self.chat_text.setTextColor(QColor(color))
+                self.chat_text.append(f"{role}: {text}\n")
+    
+        # === Auto scroll to bottom ===
+        cursor = self.chat_text.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self.chat_text.setTextCursor(cursor)
+        self.chat_text.verticalScrollBar().setValue(self.chat_text.verticalScrollBar().maximum())
+
+    def closeEvent(self, event):
+        self.tts_event.set()
+        self.stop_event.set()
+        self.stop_tts_stream()    
+        self.rag_event.set()
+        self.rag_queue.put(None)
+        # === Stop the headless MCP Server if it runs ===
+        if self.use_mcp_server:
+            self.stop_mcp_server_headless()
+            logging.info("[MCP] Server stopped on application close")
+        super().closeEvent(event)
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    app.setStyle('Fusion')
+    
+    # === Set dark palette ===
+    palette = QPalette()
+    palette.setColor(QPalette.Window, QColor(25, 25, 25))
+    palette.setColor(QPalette.WindowText, Qt.white)
+    palette.setColor(QPalette.Base, QColor(18, 18, 18))
+    palette.setColor(QPalette.AlternateBase, QColor(25, 25, 25))
+    palette.setColor(QPalette.Text, Qt.white)
+    palette.setColor(QPalette.Button, QColor(60, 60, 60))
+    palette.setColor(QPalette.ButtonText, Qt.white)
+    app.setPalette(palette)
+    
+    window = AIAssistantGUI()
+    window.show()
+    sys.exit(app.exec_())

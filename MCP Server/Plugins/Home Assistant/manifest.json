@@ -1,0 +1,14 @@
+{
+  "name": "home_assistant",
+  "version": "0.1.1 Beta",
+  "display_name": "Home Assistant",
+  "description": "Smart home control via Home Assistant (HAOS)",
+  "author": "Nechifor Marian",
+  "enabled": true,
+  
+  "dependencies": {
+    "packages": [
+      "requests>=2.32.0"
+    ]
+  }
+}

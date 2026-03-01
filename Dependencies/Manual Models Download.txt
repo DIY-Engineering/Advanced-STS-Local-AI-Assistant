@@ -1,0 +1,42 @@
+==== HOW TO DOWNLOAD THE MODELS AND WHERE TO PLACE THEM ====
+
+
+======== Silero VAD =========
+
+Open this link in your browser: https://github.com/snakers4/silero-vad/tree/master/src/silero_vad/data "right click" and "save link as" 
+to following files: "silero_vad.jit", "silero_vad.onnx", "silero_vad_half.onnx"
+And download them in the folder "Advanced STS Local AI Assistant\Silero VAD\Models"
+
+====== Faster-Whisper =======
+
+Open command prompt and copy each command from below, hit enter and wait for each model to be download.
+After all models finished downloading, go to "C:\Users\Your User Name\.cache\huggingface\hub\" and here you should find all your downloaded faster-whisper models.
+Each model folder should look something like this: "models--Systran--faster-whisper-tiny", "models--Systran--faster-whisper-small" etc. Each containing a folder called "Snapshots" 
+and a subfolder with a hash name. Now copy the content of each hash folder to the corresponding model folder from 
+"Advanced STS Local AI Assistant/Whisper STT/Models/tiny, small, base, medium, large-v3."
+
+hf download Systran/faster-whisper-tiny
+hf download Systran/faster-whisper-small
+hf download Systran/faster-whisper-base
+hf download Systran/faster-whisper-medium
+hf download Systran/faster-whisper-large-v3
+
+======= MiniLM-L6 V2 =======
+
+Open comand prompt and paste this command: hf download sentence-transformers/all-MiniLM-L6-v2
+after model has downloaded go to "C:\Users\Your User Name\.cache\huggingface\hub\models--sentence-transformers--all-MiniLM-L6-v2\snapshots\hash"
+and copy the contents of the hash folder to the "Advanced STS Local AI Assistant\RAG Embedder\MiniLM-L6-v2 
+
+====== Coqui TTS ======
+
+Open command prompt and paste this command: "hf download coqui/XTTS-v2" and hit enter. After the model has been downloaded, we go to: 
+"C:\Users\Your User Name\.cache\huggingface\hub\models--coqui--XTTS-v2\snapshots\hash", and copy the content of this folder in our project foldder 
+"Advanced STS Local AI Assistant\Coqui TTS\Models", verry important, create in the same folder a text file "tos_agreed.txt" containing the following text: "I have read, understood and agreed to the Terms and Conditions." otherwise coqui won't work.
+
+==== Project dependencies official webpages ====
+
+https://github.com/snakers4/silero-vad
+https://huggingface.co/collections/Systran/faster-whisper
+https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2
+https://huggingface.co/coqui/XTTS-v2
+

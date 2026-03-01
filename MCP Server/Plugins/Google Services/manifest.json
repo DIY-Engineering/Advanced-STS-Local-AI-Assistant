@@ -1,0 +1,19 @@
+{
+  "name": "google_services",
+  "version": "0.1.1 Beta",
+  "display_name": "Google Services",
+  "description": "Complete Google integration: Search, Gmail, Calendar, YouTube, Web Fetch",
+  "author": "Nechifor Marian",
+  "enabled": true,
+  
+  "dependencies": {
+    "packages": [
+      "google-auth>=2.48.0",
+      "google-auth-httplib2>=0.3.0",
+      "google-auth-oauthlib>=1.2.4",
+      "google-api-python-client>=2.188.0",
+      "requests>=2.32.0",
+      "beautifulsoup4>=4.14.0"
+    ]
+  }
+}
