@@ -1756,29 +1756,172 @@ class AIAssistantGUI(QMainWindow):
         """
         if self.current_profile_name is not None:
             return  # Profile already active, nothing to do
-    
+
         profile_name = "Kainé"
         profile_path = os.path.join(SETTINGS_DIR, f"{profile_name}.json")
 
         # === Switch paths to Kainé ===
         self.switch_profile_paths(profile_name)
 
-        # === If profile JSON doesn't exist yet → create it with defaults ===
         if not os.path.exists(profile_path):
+            # === Prima rulare — salvează ce e în GUI ca default ===
             default_settings = {
                 'selected_coqui_sample': 'EN Kainé (Laura Bailey).wav',
                 'wake_word': 'Kainé',
                 'wake_word_enabled': 'true',
                 'rag_memory_enabled': 'true',
-                'prompt_text': ''
+                'prompt_text': self.prompt_text.toPlainText().strip()
             }
             with open(profile_path, 'w', encoding='utf-8') as f:
                 json.dump(default_settings, f, indent=2, ensure_ascii=False)
             logging.info(f"✅ Default profile '{profile_name}' created.")
         else:
-            logging.info(f"✅ Default profile '{profile_name}' already exists.")
+            # === Profilul există → încarcă TOATE setările din JSON în GUI ===
+            try:
+                with open(profile_path, 'r', encoding='utf-8') as f:
+                    settings = json.load(f)
+                self._apply_settings_to_gui(settings)
+                logging.info(f"✅ Profile '{profile_name}' loaded at startup.")
+            except Exception as e:
+                logging.error(f"❌ Error loading default profile: {str(e)}")
 
         logging.info(f"✅ Active profile at startup: '{profile_name}'")
+
+    def _apply_settings_to_gui(self, settings):
+        """Applies a settings dictionary to the GUI. Used by both load_settings and ensure_default_profile."""
+    
+        if 'selected_mic' in settings:
+            idx = self.mic_dropdown.findText(settings['selected_mic'])
+            if idx >= 0: self.mic_dropdown.setCurrentIndex(idx)
+
+        if 'selected_output_device' in settings:
+            idx = self.output_device_dropdown.findText(settings['selected_output_device'])
+            if idx >= 0: self.output_device_dropdown.setCurrentIndex(idx)
+
+        if 'selected_lm_model' in settings:
+            text = settings['selected_lm_model']
+            # Delay pentru că dropdown-ul se populează async după 500ms
+            QTimer.singleShot(800, lambda t=text: (
+                self.lm_model_dropdown.setCurrentIndex(self.lm_model_dropdown.findText(t))
+                if self.lm_model_dropdown.findText(t) >= 0 else None
+            ))
+
+        if 'selected_coqui_sample' in settings:
+            text = settings['selected_coqui_sample']
+            self.update_coqui_sample(text)
+            idx = self.coqui_dropdown.findText(text)
+            if idx >= 0: self.coqui_dropdown.setCurrentIndex(idx)
+
+        if 'volume_level' in settings:
+            self.volume_level = int(settings['volume_level'])
+            self.volume_slider.setValue(self.volume_level)
+        if 'mic_volume' in settings:
+            self.mic_volume = int(settings['mic_volume'])
+            self.mic_volume_slider.setValue(self.mic_volume)
+        if 'coqui_temperature' in settings:
+            self.coqui_temperature = float(settings['coqui_temperature'])
+            self.coqui_temperature_slider.setValue(int(self.coqui_temperature * 100))
+        if 'coqui_top_p' in settings:
+            self.coqui_top_p = float(settings['coqui_top_p'])
+            self.coqui_top_p_slider.setValue(int(self.coqui_top_p * 100))
+        if 'coqui_top_k' in settings:
+            self.coqui_top_k = int(settings['coqui_top_k'])
+            self.coqui_top_k_slider.setValue(self.coqui_top_k)
+        if 'coqui_speed' in settings:
+            self.coqui_speed = float(settings['coqui_speed'])
+            self.coqui_speed_slider.setValue(int(self.coqui_speed * 10))
+        if 'coqui_stream_chunk_size' in settings:
+            self.coqui_stream_chunk_size = int(settings['coqui_stream_chunk_size'])
+            self.coqui_stream_chunk_size_slider.setValue(self.coqui_stream_chunk_size)
+        if 'vad_threshold' in settings:
+            self.vad_threshold = float(settings['vad_threshold'])
+            self.threshold_slider.setValue(int(self.vad_threshold * 100))
+        if 'vad_min_speech_duration' in settings:
+            self.vad_min_speech_duration = float(settings['vad_min_speech_duration'])
+            self.min_speech_slider.setValue(int(self.vad_min_speech_duration * 10))
+        if 'vad_min_silence_duration' in settings:
+            self.vad_min_silence_duration = float(settings['vad_min_silence_duration'])
+            self.min_silence_slider.setValue(int(self.vad_min_silence_duration * 10))
+
+        if 'vad_device' in settings:
+            self.vad_device = settings['vad_device']
+            idx = 0 if self.vad_device == "cuda" else 1
+            if self.vad_device_group.button(idx): self.vad_device_group.button(idx).setChecked(True)
+
+        if 'whisper_language' in settings:
+            self.whisper_language = settings['whisper_language']
+            lang_map = {"auto": 0, "en": 1, "ro": 2}
+            if self.whisper_language in lang_map:
+                self.whisper_lang_group.button(lang_map[self.whisper_language]).setChecked(True)
+
+        if 'whisper_device' in settings:
+            self.whisper_device = settings['whisper_device']
+            idx = 0 if self.whisper_device == "cuda" else 1
+            if self.whisper_device_group.button(idx): self.whisper_device_group.button(idx).setChecked(True)
+
+        if 'coqui_device' in settings:
+            self.coqui_device = settings['coqui_device']
+            idx = 0 if self.coqui_device == "cuda" else 1
+            if self.coqui_device_group.button(idx): self.coqui_device_group.button(idx).setChecked(True)
+
+        if 'wake_word' in settings:
+            self.wake_word = settings['wake_word']
+            self.wake_word_entry.setText(self.wake_word)
+
+        if 'wake_word_enabled' in settings:
+            self.wake_word_enabled = settings['wake_word_enabled'].lower() == 'true'
+            idx = 0 if self.wake_word_enabled else 1
+            if self.wake_word_group.button(idx): self.wake_word_group.button(idx).setChecked(True)
+
+        if 'use_mcp_server' in settings:
+            self.use_mcp_server = settings['use_mcp_server'].lower() == 'true'
+            idx = 0 if self.use_mcp_server else 1
+            if self.mcp_group.button(idx): self.mcp_group.button(idx).setChecked(True)
+
+        if 'real_talk_enabled' in settings:
+            self.real_talk_enabled = settings['real_talk_enabled'].lower() == 'true'
+            idx = 0 if self.real_talk_enabled else 1
+            if self.real_talk_group.button(idx): self.real_talk_group.button(idx).setChecked(True)
+
+        if 'rag_memory_enabled' in settings:
+            self.rag_memory_enabled = settings['rag_memory_enabled'].lower() == 'true'
+            idx = 0 if self.rag_memory_enabled else 1
+            if self.rag_group.button(idx): self.rag_group.button(idx).setChecked(True)
+
+        if 'whisper_model' in settings:
+            self.whisper_model = settings['whisper_model']
+            model_map = {"tiny": 0, "base": 1, "small": 2, "medium": 3, "large": 4}
+            if self.whisper_model in model_map:
+                self.whisper_model_group.button(model_map[self.whisper_model]).setChecked(True)
+
+        if 'lm_server' in settings:
+            self.lm_server = settings['lm_server']
+            self.lm_server_entry.setText(self.lm_server)
+        if 'mcp_server' in settings:
+            self.mcp_server = settings['mcp_server']
+            self.mcp_server_entry.setText(self.mcp_server)
+
+        if 'temperature' in settings:
+            self.temperature = float(settings['temperature'])
+            self.temperature_slider.setValue(int(self.temperature * 100))
+        if 'max_tokens' in settings:
+            self.max_tokens = int(settings['max_tokens'])
+            self.max_tokens_entry.setText(str(self.max_tokens))
+        if 'top_k' in settings:
+            self.top_k = int(settings['top_k'])
+            self.top_k_entry.setText(str(self.top_k))
+        if 'repetition_penalty' in settings:
+            self.repetition_penalty = float(settings['repetition_penalty'])
+            self.repetition_penalty_entry.setText(str(self.repetition_penalty))
+        if 'min_p' in settings:
+            self.min_p = float(settings['min_p'])
+            self.min_p_slider.setValue(int(self.min_p * 100))
+        if 'top_p' in settings:
+            self.top_p = float(settings['top_p'])
+            self.top_p_slider.setValue(int(self.top_p * 100))
+
+        if 'prompt_text' in settings and settings['prompt_text'].strip():
+            self.prompt_text.setPlainText(settings['prompt_text'])
 
     def reinit_rag_for_profile(self):
         """
@@ -3128,7 +3271,6 @@ NOW, based on the tool results above, what is your response?
             profile_name = self.current_profile_name or "Kainé"
             profile_path = os.path.join(SETTINGS_DIR, f"{profile_name}.json")
 
-            # === Save JSON ===
             prompt_content = self.prompt_text.toPlainText().strip()
             settings_dict = {
                 'selected_mic': self.mic_dropdown.currentText(),
@@ -3169,7 +3311,6 @@ NOW, based on the tool results above, what is your response?
                 json.dump(settings_dict, f, indent=2, ensure_ascii=False)
             logging.info(f"✅ Auto-saved current profile → '{profile_name}'")
 
-            # === Make sure paths are set correctly for current profile ===
             self.switch_profile_paths(profile_name)
 
         except Exception as e:
@@ -3198,151 +3339,8 @@ NOW, based on the tool results above, what is your response?
             with open(file_path, 'r', encoding='utf-8') as f:
                 settings = json.load(f)
 
-            # === Apply Settings ===
-
-            # === Dropdowns ===
-            if 'selected_mic' in settings:
-                text = settings['selected_mic']
-                idx = self.mic_dropdown.findText(text)
-                if idx >= 0: self.mic_dropdown.setCurrentIndex(idx)
-
-            if 'selected_output_device' in settings:
-                text = settings['selected_output_device']
-                idx = self.output_device_dropdown.findText(text)
-                if idx >= 0: self.output_device_dropdown.setCurrentIndex(idx)
-
-            if 'selected_lm_model' in settings:
-                text = settings['selected_lm_model']
-                idx = self.lm_model_dropdown.findText(text)
-                if idx >= 0: self.lm_model_dropdown.setCurrentIndex(idx)
-
-            if 'selected_coqui_sample' in settings:
-                text = settings['selected_coqui_sample']
-                self.update_coqui_sample(text)
-                idx = self.coqui_dropdown.findText(text)
-                if idx >= 0:
-                    self.coqui_dropdown.setCurrentIndex(idx)
-                else:
-                    logging.warning(f"Saved Coqui sample '{text}' not found in list.")
-
-            # === Sliders & Values ===
-            if 'volume_level' in settings:
-                self.volume_level = int(settings['volume_level'])
-                self.volume_slider.setValue(self.volume_level)
-            if 'mic_volume' in settings:
-                self.mic_volume = int(settings['mic_volume'])
-                self.mic_volume_slider.setValue(self.mic_volume)
-            if 'coqui_temperature' in settings:
-                self.coqui_temperature = float(settings['coqui_temperature'])
-                self.coqui_temperature_slider.setValue(int(self.coqui_temperature * 100))
-            if 'coqui_top_p' in settings:
-                self.coqui_top_p = float(settings['coqui_top_p'])
-                self.coqui_top_p_slider.setValue(int(self.coqui_top_p * 100))
-            if 'coqui_top_k' in settings:
-                self.coqui_top_k = int(settings['coqui_top_k'])
-                self.coqui_top_k_slider.setValue(self.coqui_top_k)
-            if 'coqui_speed' in settings:
-                self.coqui_speed = float(settings['coqui_speed'])
-                self.coqui_speed_slider.setValue(int(self.coqui_speed * 10))
-            if 'coqui_stream_chunk_size' in settings:
-                self.coqui_stream_chunk_size = int(settings['coqui_stream_chunk_size'])
-                self.coqui_stream_chunk_size_slider.setValue(self.coqui_stream_chunk_size)
-            if 'vad_threshold' in settings:
-                self.vad_threshold = float(settings['vad_threshold'])
-                self.threshold_slider.setValue(int(self.vad_threshold * 100))
-            if 'vad_min_speech_duration' in settings:
-                self.vad_min_speech_duration = float(settings['vad_min_speech_duration'])
-                self.min_speech_slider.setValue(int(self.vad_min_speech_duration * 10))
-            if 'vad_min_silence_duration' in settings:
-                self.vad_min_silence_duration = float(settings['vad_min_silence_duration'])
-                self.min_silence_slider.setValue(int(self.vad_min_silence_duration * 10))
-
-            # === Devices (Radio buttons) ===
-            if 'vad_device' in settings:
-                self.vad_device = settings['vad_device']
-                idx = 0 if self.vad_device == "cuda" else 1
-                if self.vad_device_group.button(idx): self.vad_device_group.button(idx).setChecked(True)
-
-            if 'whisper_language' in settings:
-                self.whisper_language = settings['whisper_language']
-                lang_map = {"auto": 0, "en": 1, "ro": 2}
-                if self.whisper_language in lang_map:
-                    self.whisper_lang_group.button(lang_map[self.whisper_language]).setChecked(True)
-
-            if 'whisper_device' in settings:
-                self.whisper_device = settings['whisper_device']
-                idx = 0 if self.whisper_device == "cuda" else 1
-                if self.whisper_device_group.button(idx): self.whisper_device_group.button(idx).setChecked(True)
-
-            if 'coqui_device' in settings:
-                self.coqui_device = settings['coqui_device']
-                idx = 0 if self.coqui_device == "cuda" else 1
-                if self.coqui_device_group.button(idx): self.coqui_device_group.button(idx).setChecked(True)
-
-            # === Wake Word ===
-            if 'wake_word' in settings:
-                self.wake_word = settings['wake_word']
-                self.wake_word_entry.setText(self.wake_word)
-
-            if 'wake_word_enabled' in settings:
-                self.wake_word_enabled = settings['wake_word_enabled'].lower() == 'true'
-                idx = 0 if self.wake_word_enabled else 1
-                if self.wake_word_group.button(idx): self.wake_word_group.button(idx).setChecked(True)
-
-            # === Booleans ===
-            if 'use_mcp_server' in settings:
-                self.use_mcp_server = settings['use_mcp_server'].lower() == 'true'
-                idx = 0 if self.use_mcp_server else 1
-                if self.mcp_group.button(idx): self.mcp_group.button(idx).setChecked(True)
-
-            if 'real_talk_enabled' in settings:
-                self.real_talk_enabled = settings['real_talk_enabled'].lower() == 'true'
-                idx = 0 if self.real_talk_enabled else 1
-                if self.real_talk_group.button(idx): self.real_talk_group.button(idx).setChecked(True)
-
-            if 'rag_memory_enabled' in settings:
-                self.rag_memory_enabled = settings['rag_memory_enabled'].lower() == 'true'
-                idx = 0 if self.rag_memory_enabled else 1
-                if self.rag_group.button(idx): self.rag_group.button(idx).setChecked(True)
-
-            # === Whisper Model ===
-            if 'whisper_model' in settings:
-                self.whisper_model = settings['whisper_model']
-                model_map = {"tiny": 0, "base": 1, "small": 2, "medium": 3, "large": 4}
-                if self.whisper_model in model_map:
-                    self.whisper_model_group.button(model_map[self.whisper_model]).setChecked(True)
-
-            # === Servers ===
-            if 'lm_server' in settings:
-                self.lm_server = settings['lm_server']
-                self.lm_server_entry.setText(self.lm_server)
-            if 'mcp_server' in settings:
-                self.mcp_server = settings['mcp_server']
-                self.mcp_server_entry.setText(self.mcp_server)
-
-            # === LLM Params ===
-            if 'temperature' in settings:
-                self.temperature = float(settings['temperature'])
-                self.temperature_slider.setValue(int(self.temperature * 100))
-            if 'max_tokens' in settings:
-                self.max_tokens = int(settings['max_tokens'])
-                self.max_tokens_entry.setText(str(self.max_tokens))
-            if 'top_k' in settings:
-                self.top_k = int(settings['top_k'])
-                self.top_k_entry.setText(str(self.top_k))
-            if 'repetition_penalty' in settings:
-                self.repetition_penalty = float(settings['repetition_penalty'])
-                self.repetition_penalty_entry.setText(str(self.repetition_penalty))
-            if 'min_p' in settings:
-                self.min_p = float(settings['min_p'])
-                self.min_p_slider.setValue(int(self.min_p * 100))
-            if 'top_p' in settings:
-                self.top_p = float(settings['top_p'])
-                self.top_p_slider.setValue(int(self.top_p * 100))
-
-            # === System Prompt ===
-            if 'prompt_text' in settings:
-                self.prompt_text.setPlainText(settings['prompt_text'])
+            # === Apply all settings to GUI ===
+            self._apply_settings_to_gui(settings)
 
             # === Refresh MCP Logic ===
             if self.use_mcp_server:
