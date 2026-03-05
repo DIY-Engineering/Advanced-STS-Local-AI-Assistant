@@ -309,7 +309,7 @@ class AIAssistantGUI(QMainWindow):
         self.rag_embedder = None
         self.rag_client = None
         self.rag_collection = None
-        self.current_profile_name = None  # === None = no profile loaded => generic mode ===
+        self.current_profile_name = None  # === None = No profile is Loadad => (if no profile is loaded your conversation is saved in the default profile "Kainé") ===
         self.current_chat_log = CHAT_LOG  # === Starts Generic ===
         self.current_rag_dir = os.path.join(RAG_DATABASE_DIR, "Kainé")  # === Modified from "Chat History" to "Kainé" (Kainé is the default profile) ===
         self.rag_queue = queue.Queue()
