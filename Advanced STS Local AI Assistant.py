@@ -90,7 +90,7 @@ _created = create_folder_structure()
 
 # ====== LOGGING CONFIG ======
 MCP_SERVER_DIR  = os.path.join(BASE_DIR, "MCP Server")
-MCP_SERVER_FILE = os.path.join(MCP_SERVER_DIR, "MCP Server 0.1.1 Beta.py")
+MCP_SERVER_FILE = os.path.join(MCP_SERVER_DIR, "MCP Server.py")
 LOG_DIR = os.path.join(BASE_DIR, "Debug Logs")
 
 class Utf8StreamHandler(logging.StreamHandler):
