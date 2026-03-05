@@ -36,7 +36,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QComboB
 from PyQt5.QtCore import Qt, pyqtSignal, QObject, QTimer
 from PyQt5.QtGui import QFont, QPalette, QColor, QPixmap, QPainter, QBrush, QTextCursor, QPen
 
-# Fix encoding for console
+# === Fix encoding for console ===
 sys.stdout.reconfigure(encoding='utf-8')
 sys.stderr.reconfigure(encoding='utf-8')
 
@@ -85,12 +85,12 @@ def create_folder_structure():
 
     return created
 
-# Create all folders at startup
+# === Create all folders at startup ===
 _created = create_folder_structure()
 
 # ====== LOGGING CONFIG ======
 MCP_SERVER_DIR  = os.path.join(BASE_DIR, "MCP Server")
-MCP_SERVER_FILE = os.path.join(MCP_SERVER_DIR, "MCP Server.py")
+MCP_SERVER_FILE = os.path.join(MCP_SERVER_DIR, "MCP Server 0.1.1 Beta.py")
 LOG_DIR = os.path.join(BASE_DIR, "Debug Logs")
 
 class Utf8StreamHandler(logging.StreamHandler):
@@ -111,7 +111,7 @@ logging.basicConfig(
 # ====== GLOBAL CONFIG ======
 PROMPTS_DIR        = os.path.join(BASE_DIR, "System Prompt")
 HISTORY_DIR        = os.path.join(BASE_DIR, "Chat History")
-CHAT_LOG           = os.path.join(HISTORY_DIR, "Chat History.txt")
+CHAT_LOG           = os.path.join(HISTORY_DIR, "Chat History.txt") # === Should be modified in to the default profile name, aka "Kainé" ===
 SETTINGS_DIR       = os.path.join(BASE_DIR, "Profiles")
 COQUI_MODELS_DIR   = os.path.join(BASE_DIR, "Coqui TTS", "Models")
 COQUI_SAMPLES_DIR  = os.path.join(BASE_DIR, "Coqui TTS", "Samples")
@@ -119,7 +119,7 @@ WHISPER_MODELS_DIR = os.path.join(BASE_DIR, "Whisper STT", "Models")
 GRAPHICS_DIR       = os.path.join(BASE_DIR, "Graphics")
 RAG_EMBEDDER_DIR   = os.path.join(BASE_DIR, "RAG Embedder", "MiniLM-L6-v2")
 RAG_DATABASE_DIR   = os.path.join(BASE_DIR, "RAG Vector Database")
-# Note: all folders above are created at startup by create_folder_structure()
+# === All folders above are created at startup by create_folder_structure() ===
 CHUNK = 512
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
@@ -187,25 +187,25 @@ class VUMeter(QWidget):
     def paintEvent(self, event):
         """Draws VU-Meter Segments - Vintage LED Style"""
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, False)  # Disable antialiasing pentru look mai crisp
+        painter.setRenderHint(QPainter.Antialiasing, False)  # === Antialiass off for a crisper look ===
         
         for i in range(self.num_segments):
             x = i * (self.segment_width + self.gap)
             
-            # Determines color based on level and position
+            # === Determines color based on level and position ===
             if i < self.level:
                 if i < 10:
-                    color = QColor("#00FF00")  # Verde
+                    color = QColor("#00FF00")  # Green
                 elif i < 12:
-                    color = QColor("#FFFF00")  # Galben
+                    color = QColor("#FFFF00")  # Yellow
                 else:
-                    color = QColor("#FF0000")  # Roșu
+                    color = QColor("#FF0000")  # Red
             else:
-                color = QColor("#0A0A0A")  # Negru (off) - mai întunecat
+                color = QColor("#0A0A0A")  # Black (off) - Darker
             
-            # Draw the segment with a solid white frame
-            painter.setPen(QPen(QColor("#FFFFFF"), 1, Qt.SolidLine))  # Cadru alb solid 1px
-            painter.setBrush(QBrush(color, Qt.SolidPattern))  # Fill solid
+            # === Draw the segment with a solid white frame ===
+            painter.setPen(QPen(QColor("#FFFFFF"), 1, Qt.SolidLine))  # === Solid 1 pixel white frame ===
+            painter.setBrush(QBrush(color, Qt.SolidPattern))  # === Fill solid ===
             painter.drawRect(x, 0, self.segment_width, self.segment_height)
 
 class RefreshableComboBox(QComboBox):
@@ -219,7 +219,7 @@ class RefreshableComboBox(QComboBox):
 
     def showPopup(self):
         if self.refresh_callback:
-            # Call refresh function before opening menu
+            # === Call refresh function before opening menu ===
             self.refresh_callback()
         super().showPopup()
 
@@ -310,9 +310,9 @@ class AIAssistantGUI(QMainWindow):
         self.rag_embedder = None
         self.rag_client = None
         self.rag_collection = None
-        self.current_profile_name = None  # ==== None = no profile loaded => generic mode ===
+        self.current_profile_name = None  # === None = no profile loaded => generic mode ===
         self.current_chat_log = CHAT_LOG  # === Starts Generic ===
-        self.current_rag_dir = os.path.join(RAG_DATABASE_DIR, "Chat History")  # === Starts Generic ===
+        self.current_rag_dir = os.path.join(RAG_DATABASE_DIR, "Chat History")  # === Should be modified to use the default profile name, aka "Kainé" ===
         self.rag_queue = queue.Queue()
         self.rag_event = threading.Event()
         self.rag_thread = None
@@ -368,7 +368,7 @@ class AIAssistantGUI(QMainWindow):
         # === Timer for updating resources ===
         self.resource_timer = QTimer(self)
         self.resource_timer.timeout.connect(self.update_resources)
-        self.resource_timer.start(1000)  # Update la fiecare secundă
+        self.resource_timer.start(1000)  # === Update every second ===
 
     def show_thread_safe_warning(self, title, message):
         """This function runs on the Main Thread and displays the message without crashing the application."""
@@ -427,7 +427,7 @@ class AIAssistantGUI(QMainWindow):
                 background-color: #121212;
                 color: #FFFFFF;
                 selection-background-color: #3C3C3C;
-                padding-top: 2px;  /* Mută și textul din listă cu 2px în sus */
+                padding-top: 2px;  /* Also move the text in the list 2px up */
             }
         """        
         slider_style = """
@@ -875,7 +875,7 @@ class AIAssistantGUI(QMainWindow):
         self.lm_model_dropdown.setGeometry(9, 42, 307, 20)
         self.lm_model_dropdown.setStyleSheet(combo_style)
         self.lm_model_dropdown.currentTextChanged.connect(lambda text: setattr(self, 'selected_lm_model', text))
-        # We connect the refresh callback
+        # === We connect the refresh callback ===
         self.lm_model_dropdown.set_refresh_callback(self.load_lm_models)
         
         prompt_label = QLabel("System Prompt", lm_frame)
@@ -885,7 +885,7 @@ class AIAssistantGUI(QMainWindow):
         self.prompt_text = QTextEdit(lm_frame)
         self.prompt_text.setGeometry(10, 86, 306, 100)
         self.prompt_text.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        # Apply scrollbar style
+        # === Apply scrollbar style ===
         self.prompt_text.setStyleSheet("""
             QTextEdit {
                 background-color: #121212;
@@ -942,7 +942,7 @@ class AIAssistantGUI(QMainWindow):
         radio_wake_off.setStyleSheet("color: #FFFFFF;")
         radio_wake_off.toggled.connect(lambda checked: setattr(self, 'wake_word_enabled', False) if checked else None)
         self.wake_word_group.addButton(radio_wake_off, 1)
-        radio_wake_off.setChecked(not self.wake_word_enabled)  # Set as OFF if wake_word_enabled is False
+        radio_wake_off.setChecked(not self.wake_word_enabled)  # === Set as OFF if wake_word_enabled is False ===
         
         max_tokens_label = QLabel("Max Tokens", lm_frame)
         max_tokens_label.setGeometry(188, 284, 80, 20)
@@ -1253,7 +1253,7 @@ class AIAssistantGUI(QMainWindow):
                 vram_color = self.get_usage_color(vram_percent)
             
             except:
-                pass  # If it's not NVIDIA or an error, stay N/A
+                pass  # === If it's not NVIDIA or an error, stay N/A ===
 
             self.gpu_vram_label.setText(
                 f'GPU: <span style="color:{gpu_color};">{gpu_util_str}</span>   '
@@ -1278,11 +1278,11 @@ class AIAssistantGUI(QMainWindow):
 
     def get_usage_color(self, percent): # === Returns the color based on percentage ===
         if percent < 70:
-            return "#00FF00"  # Verde - safe zone
+            return "#00FF00"  # Green - Safe Zone
         elif percent < 90:
-            return "#FFFF00"  # Galben - atenție
+            return "#FFFF00"  # Yellow - Attention
         else:
-            return "#FF0000"  # Roșu - pericol!
+            return "#FF0000"  # Red - Danger!
 
     def update_mic_volume_label(self, value):
         self.mic_volume = value
@@ -1495,8 +1495,8 @@ class AIAssistantGUI(QMainWindow):
                     time.sleep(0.05)
                     self.vu_meter_input.set_level(0)
                     
-                    # ⚠️ CRITICAL: While it's on pause, it reads and discards the data ⚠️
-                    # This keeps the buffer empty and prevents "echo" (mic bleed)
+                    # === ⚠️ CRITICAL: While it's on pause, it reads and discards the data ⚠️ ===
+                    # === This keeps the buffer empty and prevents "echo" (mic bleed) ===
                     if self.audio_stream:
                         try:
                             to_read = self.audio_stream.get_read_available()
@@ -1532,7 +1532,7 @@ class AIAssistantGUI(QMainWindow):
                              if self.real_talk_enabled and self.tts_active:
                                 logging.info("REAL TALK: Barge-in detected! Stopping TTS...")
                                 self.stop_tts_stream()
-                                time.sleep(0.05) # Așteaptă oprirea audio
+                                time.sleep(0.05) # === Waits audio stop ===
                                 frames = []
                                 recording_active = True
                                 speech_detected_frames = 0
@@ -1555,7 +1555,7 @@ class AIAssistantGUI(QMainWindow):
                                     
                                     if not self.real_talk_enabled:
                                         self.recording_paused = True
-                                        # Flush immediately to clear the last ms of silence
+                                        # === Flush immediately to clear the last ms of silence ===
                                         if self.audio_stream:
                                             try:
                                                 self.audio_stream.read(self.audio_stream.get_read_available(), exception_on_overflow=False)
@@ -1614,11 +1614,11 @@ class AIAssistantGUI(QMainWindow):
                         logging.info(f"Wake word not detected.")
 
                 if should_process:
-                    # AI query with general prompt
+                    # === AI query with general prompt ===
                     initial_response = self.query_lm_studio(prompt_to_process)
                     
                     if not initial_response:
-                        return  # LM Studio error, stop here
+                        return  # === LM Studio error, stop here ===
                     
                     # ====== FORK: Simple Chat vs. MCP workflow ======
                     tool_calls = self.parse_tool_calls(initial_response)
@@ -1646,7 +1646,7 @@ class AIAssistantGUI(QMainWindow):
         except Exception as e:
             logging.error(f"Error processing audio segment: {str(e)}")
         finally:
-            # Resume microphone listening for Standard Mode
+            # === Resume microphone listening for Standard Mode ===
             if not self.real_talk_enabled and self.recording_paused:
                 self.recording_paused = False
                 self.resume_event.set()
@@ -1706,7 +1706,7 @@ class AIAssistantGUI(QMainWindow):
             if not parsed:
                 continue
     
-            # Check for valid tool call format (MCP Standard)
+            # === Check for valid tool call format (MCP Standard) ===
             if "tool" in parsed and "arguments" in parsed:
                 tool_calls.append(parsed)
                 logging.info(f"✅ Parsed tool call: {parsed['tool']} (id: {parsed.get('id', 'N/A')})")
@@ -1755,7 +1755,7 @@ class AIAssistantGUI(QMainWindow):
         and activates the default 'Kainé' profile with default values.
         """
         if self.current_profile_name is not None:
-            return  # Profile already active, nothing to do
+            return  # === Profile already active, nothing to do ===
 
         profile_name = "Kainé"
         profile_path = os.path.join(SETTINGS_DIR, f"{profile_name}.json")
@@ -1764,7 +1764,7 @@ class AIAssistantGUI(QMainWindow):
         self.switch_profile_paths(profile_name)
 
         if not os.path.exists(profile_path):
-            # === Prima rulare — salvează ce e în GUI ca default ===
+            # === First run — save what's in the GUI as default ===
             default_settings = {
                 'selected_coqui_sample': 'EN Kainé (Laura Bailey).wav',
                 'wake_word': 'Kainé',
@@ -1776,7 +1776,7 @@ class AIAssistantGUI(QMainWindow):
                 json.dump(default_settings, f, indent=2, ensure_ascii=False)
             logging.info(f"✅ Default profile '{profile_name}' created.")
         else:
-            # === Profilul există → încarcă TOATE setările din JSON în GUI ===
+            # === If Profile exists → load ALL settings from JSON into GUI ===
             try:
                 with open(profile_path, 'r', encoding='utf-8') as f:
                     settings = json.load(f)
@@ -1800,7 +1800,7 @@ class AIAssistantGUI(QMainWindow):
 
         if 'selected_lm_model' in settings:
             text = settings['selected_lm_model']
-            # Delay pentru că dropdown-ul se populează async după 500ms
+            # === Delay because the dropdown populates async after 500ms ===
             QTimer.singleShot(800, lambda t=text: (
                 self.lm_model_dropdown.setCurrentIndex(self.lm_model_dropdown.findText(t))
                 if self.lm_model_dropdown.findText(t) >= 0 else None
@@ -2012,10 +2012,10 @@ class AIAssistantGUI(QMainWindow):
         except Exception as e:
             logging.error(f"Critical RAG Worker Error: {str(e)}")
 
-    def query_rag_memory(self, query_text, top_k=12):  # Schimbat de la 10 la 12
+    def query_rag_memory(self, query_text, top_k=4):  # === Changed from 12 to 4 ===
         """
         RAG memory query - optimized version
-        Returns: 12 relevant messages (balanced User/Assistant)
+        Returns: 4 relevant messages (balanced User/Assistant)
         """
         try:
             if not self.rag_memory_enabled or not self.rag_embedder or self.rag_collection.count() == 0:
@@ -2027,7 +2027,7 @@ class AIAssistantGUI(QMainWindow):
             # === ChromaDB search (we are looking for more so we can balance) ===
             results = self.rag_collection.query(
                 query_embeddings=[query_embedding],
-                n_results=min(top_k * 2, self.rag_collection.count())  # x2 pentru filtrare
+                n_results=min(top_k * 2, self.rag_collection.count())  # === *2 for filtering ===
             )
         
             if not results['documents'] or not results['documents'][0]:
@@ -2036,7 +2036,7 @@ class AIAssistantGUI(QMainWindow):
             # ====== SEPARATION BY ROLLS ======
             user_messages = []
             assistant_messages = []
-            seen_texts = set()  # Deduplicare
+            seen_texts = set()  # === Deduplicate ===
         
             for doc, meta in zip(results['documents'][0], results['metadatas'][0]):
                 role = meta.get('role', 'Unknown')
@@ -2044,7 +2044,7 @@ class AIAssistantGUI(QMainWindow):
                 # === Text cleanup: remove emoji and special characters ===
                 import re
                 doc_clean = re.sub(r'[^\w\s,.!?\'-]', '', doc, flags=re.UNICODE)
-                doc_clean = ' '.join(doc_clean.split())  # Cleanup whitespace
+                doc_clean = ' '.join(doc_clean.split())  # === Cleanup whitespace ===
             
                 # === Skip duplicates ===
                 if doc_clean in seen_texts or len(doc_clean.strip()) < 5:
@@ -2061,9 +2061,9 @@ class AIAssistantGUI(QMainWindow):
                 elif role == "Assistant":
                     assistant_messages.append(doc_clean)
         
-            # ====== BALANCING: 6 User + 6 Assistant ======
-            selected_user = user_messages[:6]  # Schimbat de la 5 la 6
-            selected_assistant = assistant_messages[:6]  # Schimbat de la 5 la 6
+            # ====== BALANCING: 2 User + 2 Assistant ======
+            selected_user = user_messages[:2]  # === Changed from 6 to 2 ===
+            selected_assistant = assistant_messages[:2]  # === Changed from 6 to 2 ===
         
             # === FINAL FORMATTING ===
             context_parts = []
@@ -2087,7 +2087,7 @@ class AIAssistantGUI(QMainWindow):
             context = "\n".join(context_parts)
         
             # === TOKEN LIMIT CHECK ===
-            max_chars = 2000  # Crescut de la 1500 (pentru 12 mesaje)
+            max_chars = 800  # Lowered from 2000 (for 4 messages)
             if len(context) > max_chars:
                 # === Truncate to last complete message ===
                 context = context[:max_chars]
@@ -2290,7 +2290,7 @@ class AIAssistantGUI(QMainWindow):
     def load_lm_models(self):
         logging.info("Loading LM Studio models")
         try:
-            base_url = self.lm_server_entry.text().rstrip('/') # Luam URL-ul din GUI, e mai safe
+            base_url = self.lm_server_entry.text().rstrip('/') # === Luam URL-ul din GUI, e mai safe ===
             if not base_url:
                 base_url = "http://127.0.0.1:1234"
                 
@@ -2334,7 +2334,7 @@ class AIAssistantGUI(QMainWindow):
         def check():
             try:
                 if self.lm_model_dropdown.count() > 0 and self.lm_model_dropdown.itemText(0) != "No loaded models":
-                    # ===We have a model → we stop the timer ===
+                    # === We have a model → we stop the timer ===
                     return
                 base_url = self.lm_server_entry.text().rstrip('/')
                 if not base_url:
@@ -2357,7 +2357,7 @@ class AIAssistantGUI(QMainWindow):
 
         # === Start the checker only if we don't already have a model ===
         if self.lm_model_dropdown.count() == 0 or "No loaded models" in self.lm_model_dropdown.itemText(0):
-            QTimer.singleShot(500, check)  # Începe după 0.5s de la pornire
+            QTimer.singleShot(500, check)  # === Starts before 0.5s on startup ===
 
     def transcribe_audio(self, audio_array):
         """Transcribe audio using Faster-Whisper (optimized, local models only)"""
@@ -2395,7 +2395,7 @@ class AIAssistantGUI(QMainWindow):
             
                 # === DETERMINE COMPUTE TYPE ===
                 if device == "cpu":
-                    compute_type = "int8"  # CPU: int8 is the fastest
+                    compute_type = "int8"  # === CPU: int8 is the fastest ===
                 else:
                     # === GPU: float16 for maximum compatibility. If on runtime you get an error set it to float32 ===
                     compute_type = "float32"
@@ -2406,11 +2406,11 @@ class AIAssistantGUI(QMainWindow):
                 try:
                     # === LOAD LOCAL MODEL (no download) ===
                     self.faster_whisper_model = WhisperModel(
-                        model_path,  # Complete local path
+                        model_path,  # === Complete local path ===
                         device=device,
                         compute_type=compute_type,
-                        download_root=None,  # DISABLE download
-                        local_files_only=True  # FORCE local only
+                        download_root=None,  # === DISABLE Download ===
+                        local_files_only=True  # === FORCE local only ===
                     )
                 
                     # === Update tracking variables ===
@@ -2439,10 +2439,10 @@ class AIAssistantGUI(QMainWindow):
                 word_timestamps=False
             )
         
-            # === Extract text ===
+            # === Extract Text ===
             transcription = " ".join([segment.text for segment in segments]).strip()
         
-            # === Log detected language ===
+            # === Log Detected Language ===
             if language is None:
                 logging.info(f"🌐 Detected language: {info.language} ({info.language_probability:.0%})")
         
@@ -2478,30 +2478,30 @@ class AIAssistantGUI(QMainWindow):
             memory_context = ""
         
             if self.rag_memory_enabled:
-                # === 1. OLDER MEMORIES (RAG - 12 semantic messages) ===
-                rag_context = self.query_rag_memory(prompt, top_k=12)  # Schimbat de la 10 la 12
-            
+                # === RAG ON: Semantic memory + last 2 recent messages ===
+                rag_context = self.query_rag_memory(prompt, top_k=4)
+
                 if rag_context:
-                    memory_context += "=== OLDER MEMORIES (Semantic Context) ===\n"
+                    memory_context += "=== SEMANTIC MEMORY ===\n"
                     memory_context += rag_context + "\n\n"
-                    logging.info("📚 RAG: 12 semantic messages injected (Older Memories)")
-            
-                # === 2. RECENT MEMORIES (Last 6 messages - 3 user, 3 assistant) ===
-                recent_context = self.get_recent_conversation(max_pairs=3)
-            
+                    logging.info("📚 RAG: 4 semantic messages injected")
+
+                # === Last 2 messages ALWAYS — for continuity ===
+                recent_context = self.get_recent_conversation(max_pairs=1)
+
                 if recent_context:
-                    memory_context += "=== RECENT MEMORIES (Last Conversation) ===\n"
+                    memory_context += "=== RECENT CONTEXT ===\n"
                     memory_context += recent_context + "\n"
-                    logging.info("🕐 Recent: 6 messages injected (Recent Memories)")
-        
+                    logging.info("🕐 Recent: 2 messages injected (continuity)")
+
             else:
-                # === RAG DISABLED: Only the last 6 messages (3 user, 3 assistant) ===
-                recent_context = self.get_recent_conversation(max_pairs=3)
-            
+                # === RAG OFF: Fallback to last 4 recent messages ===
+                recent_context = self.get_recent_conversation(max_pairs=2)
+
                 if recent_context:
                     memory_context += "=== RECENT CONVERSATION ===\n"
                     memory_context += recent_context + "\n"
-                    logging.info("🕐 Recent: 6 messages injected (RAG disabled)")
+                    logging.info("🕐 Recent: 4 messages injected (RAG disabled)")
          
             # === INJECT MEMORY IN SYSTEM PROMPT ===
             if memory_context:
@@ -2783,7 +2783,7 @@ class AIAssistantGUI(QMainWindow):
             else:
                 results_text += f"\n❌ {tool_name} FAILED:\n{result.get('error', 'Unknown error')}\n"
         
-        # === SPECIAL PROMPT with clear instructions ===
+        # === SPECIAL PROMPT WITH CLEAR TOOL USE INSTRUCTION ===
         prompt = f"""TOOL EXECUTION RESULTS
 {'='*60}
 
@@ -2855,19 +2855,19 @@ NOW, based on the tool results above, what is your response?
                 try:
                     data = json.loads(text_content)
                 
-                    # ✅ FIX: Handle both dict and list responses
+                    # === Handle both dict and list responses ===
                     if isinstance(data, dict):
-                        # Standard response (most tools)
+                        #  === Standard response (most tools) ===
                         return data
                     elif isinstance(data, list):
-                        # List response (e.g., gmail_list, calendar_list)
+                        # === List response (e.g., gmail_list, calendar_list) ===
                         return {"ok": True, "data": data}
                     else:
-                        # Other types (string, number, etc.)
+                        # === Other types (string, number, etc.) ===
                         return {"ok": True, "data": data}
                     
                 except json.JSONDecodeError:
-                    # Non-JSON response
+                    #  === Non-JSON response ===
                     return {"ok": True, "data": text_content}
     
             return {"ok": False, "error": "No content in response"}
@@ -3128,7 +3128,7 @@ NOW, based on the tool results above, what is your response?
             "base": "base", 
             "small": "small",
             "medium": "medium",
-            "large": "large-v3"  # Large uses version v3
+            "large": "large-v3"  # === Large uses version v3 === 
         }
     
         folder_name = model_folder_map.get(model_name)
@@ -3203,10 +3203,10 @@ NOW, based on the tool results above, what is your response?
             profile_name = os.path.splitext(os.path.basename(file_path))[0]
 
             if profile_name != self.current_profile_name:
-                # New profile name → move chat history and RAG to new profile
+                # === New profile name → move chat history and RAG to new profile ===
                 self.save_current_conversation_to_profile(profile_name)
             else:
-                # Same profile name → paths already correct, just reinit to be safe
+                # === Same profile name → paths already correct, just reinit to be safe ===
                 self.switch_profile_paths(profile_name)
                 self.reinit_rag_for_profile()
         
@@ -3437,8 +3437,8 @@ NOW, based on the tool results above, what is your response?
     def load_initial_chat_history(self):
         """Load chat history at startup"""
         try:
-            if os.path.exists(self.current_chat_log):                              # ← schimbat
-                with open(self.current_chat_log, "r", encoding="utf-8") as f:     # ← schimbat
+            if os.path.exists(self.current_chat_log):                          
+                with open(self.current_chat_log, "r", encoding="utf-8") as f: 
                     lines = f.readlines()  
       
                 self.chat_history = []
@@ -3580,7 +3580,7 @@ NOW, based on the tool results above, what is your response?
                                 role, text = rest.split(": ", 1)
                             
                                 if role in ["User", "Assistant"]:
-                                    # Add next lines without timestamp
+                                    # === Add next lines without timestamp ===
                                     full_text = text
                                     i += 1
                                 
@@ -3803,8 +3803,6 @@ NOW, based on the tool results above, what is your response?
         """Displays only visible messeges in UI"""
         self.chat_text.clear()
 
-        # ========================== Temporary Debug ===================================
-
         logging.info(f"🐛 Total messages: {len(self.chat_history)}")
         for i, entry in enumerate(self.chat_history):
             role = entry.get('role', 'UNKNOWN')
@@ -3812,7 +3810,6 @@ NOW, based on the tool results above, what is your response?
             text_preview = entry.get('text', '')[:30]
             logging.info(f"🐛 [{i}] {role} | visible={visible} | '{text_preview}...'")
 
-        # ==============================================================================
 
         # === Chronological sorting before display ===
         sorted_history = sorted(self.chat_history, key=lambda x: x.get('timestamp', ''))
