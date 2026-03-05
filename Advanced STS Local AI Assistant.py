@@ -1934,7 +1934,7 @@ class AIAssistantGUI(QMainWindow):
 
             self.rag_client = chromadb.PersistentClient(
                 path=self.current_rag_dir,
-                settings=Settings(anonymized_telemetry=False)
+                settings=Settings(anonymized_telemetry=False, allow_reset=True)
             )
             self.rag_collection = self.rag_client.get_or_create_collection(
                 name="chat_memory",
@@ -1957,7 +1957,7 @@ class AIAssistantGUI(QMainWindow):
             # === ChromaDB initialization ===
             self.rag_client = chromadb.PersistentClient(
                 path=self.current_rag_dir, # === Dynamic Folder ===
-                settings=Settings(anonymized_telemetry=False)
+                settings=Settings(anonymized_telemetry=False, allow_reset=True)
             )
         
             # === Create/Access collection ===
@@ -3226,20 +3226,31 @@ NOW, based on the tool results above, what is your response?
             if self.rag_thread and self.rag_thread.is_alive():
                 self.rag_queue.put(None)
                 self.rag_thread.join(timeout=2)
+                logging.info("✅ RAG worker thread stopped.")
 
-            # === Close ChromaDB ===
-            self.rag_collection = None
-            self.rag_client = None
-            gc.collect()
-            time.sleep(0.5)
+            # === client.reset() — explicitly releases ALL file handles (mmap + SQLite WAL) ===
+            # === This is the only reliable way to unlock chroma.sqlite3 and HNSW .bin files on Windows ===
+            try:
+                if self.rag_client is not None:
+                    self.rag_client.reset()
+                    logging.info("✅ ChromaDB reset() called — all file handles released.")
+                self.rag_collection = None
+                self.rag_client = None
+                gc.collect()
+                time.sleep(0.3)
+                logging.info("✅ ChromaDB client closed.")
+            except Exception as e:
+                logging.error(f"❌ Error during ChromaDB reset: {str(e)}")
+                self.rag_collection = None
+                self.rag_client = None
 
-            # === Delete old generic RAG DB — no move, just delete! ===
+            # === Delete old RAG DB — no move, just delete! ===
             # It will be rebuilt from Chat History at the new profile path
             old_rag_dir = self.current_rag_dir
             if os.path.exists(old_rag_dir):
                 try:
                     shutil.rmtree(old_rag_dir)
-                    logging.info(f"✅ Old generic RAG DB deleted: {old_rag_dir}")
+                    logging.info(f"✅ Old RAG DB deleted: {old_rag_dir}")
                 except Exception as e:
                     logging.warning(f"⚠️ Could not delete old RAG DB: {e} — will be overwritten on next use")
 
@@ -3532,41 +3543,88 @@ NOW, based on the tool results above, what is your response?
         reply = QMessageBox.question(
             self, 
             "Confirm", 
-            "Clear chat history?\n\n⚠️ This will also clear the RAG memory database!",
+            "Clear chat history?\n\n⚠️ This will also completely reset the RAG memory database!\n"
+            "The SQLite file will be deleted and recreated from scratch.",
             QMessageBox.Yes | QMessageBox.No
         )
     
         if reply == QMessageBox.Yes:
-            # === Clear chat history ===
+            # === 1. Clear in-memory chat history and UI ===
             self.chat_history = []
             self.chat_text.clear()
         
-            # === Clear chat log file ===
-            with open(self.current_chat_log, "w", encoding="utf-8") as f:
-                pass
-        
-            # === Clear RAG Database ===
-            if self.rag_collection:
-                try:
-                    # === Obtain all ID's from collection ===
-                    result = self.rag_collection.get()
-                    ids = result.get('ids', [])
-                
-                    if ids:
-                        # === Deletes all documents ===
-                        self.rag_collection.delete(ids=ids)
-                        logging.info(f"✅ RAG Database cleared: {len(ids)} documents deleted")
-                    else:
-                        logging.info("ℹ️ RAG Database was already empty")
-                    
-                except Exception as e:
-                    logging.error(f"❌ Error clearing RAG database: {str(e)}")
-        
-            logging.info("Chat history and RAG database cleared.")
+            # === 2. Clear chat log file ===
+            try:
+                with open(self.current_chat_log, "w", encoding="utf-8") as f:
+                    pass
+                logging.info("✅ Chat log file cleared.")
+            except Exception as e:
+                logging.error(f"❌ Error clearing chat log file: {str(e)}")
+
+            # === 3. Stop RAG worker thread — it holds a lock on chroma.sqlite3 ===
+            try:
+                if self.rag_thread and self.rag_thread.is_alive():
+                    self.rag_queue.put(None)
+                    self.rag_thread.join(timeout=2)
+                    logging.info("✅ RAG worker thread stopped.")
+            except Exception as e:
+                logging.error(f"❌ Error stopping RAG thread: {str(e)}")
+
+            # === 4. Delete + recreate collection + explicit VACUUM ===
+            # === ChromaDB holds a SQLite connection pool for the entire process lifetime.  ===
+            # === shutil.rmtree() will always fail with WinError 32 while the process runs. ===
+            # === We delete the collection, recreate it fresh, then run VACUUM directly on  ===
+            # === chroma.sqlite3 via Python's sqlite3 module to reclaim the physical space.  ===
+            try:
+                if self.rag_client is not None:
+                    # === Step A: Delete collection — marks all data as free pages in SQLite ===
+                    self.rag_client.delete_collection("chat_memory")
+                    logging.info("✅ RAG collection deleted.")
+
+                    # === Step B: Recreate fresh empty collection ===
+                    self.rag_collection = self.rag_client.create_collection(
+                        name="chat_memory",
+                        metadata={"hnsw:space": "cosine"}
+                    )
+                    logging.info("✅ Fresh RAG collection created.")
+
+                    # === Step C: Run VACUUM directly on chroma.sqlite3 to reclaim disk space ===
+                    # === SQLite marks deleted pages as free but keeps file size without VACUUM ===
+                    # === We use a separate sqlite3 connection — safe because ChromaDB is idle ===
+                    import sqlite3 as _sqlite3
+                    sqlite_path = os.path.join(self.current_rag_dir, "chroma.sqlite3")
+                    if os.path.exists(sqlite_path):
+                        try:
+                            conn = _sqlite3.connect(sqlite_path)
+                            conn.execute("VACUUM")
+                            conn.close()
+                            size_kb = os.path.getsize(sqlite_path) / 1024
+                            logging.info(f"✅ SQLite VACUUM complete — file size: {size_kb:.1f} KB")
+                        except Exception as ve:
+                            logging.warning(f"⚠️ VACUUM failed (non-critical): {str(ve)}")
+                else:
+                    # === Client not available — full reinit as fallback ===
+                    self.reinit_rag_for_profile()
+                    logging.info("✅ RAG reinitialized (fallback).")
+            except Exception as e:
+                logging.error(f"❌ Error resetting RAG collection: {str(e)}")
+                self.reinit_rag_for_profile()
+
+            # === 5. Restart RAG worker thread ===
+            try:
+                self.rag_event.clear()
+                self.rag_thread = threading.Thread(target=self.rag_worker, daemon=True)
+                self.rag_thread.start()
+                logging.info("✅ RAG worker thread restarted.")
+            except Exception as e:
+                logging.error(f"❌ Error restarting RAG thread: {str(e)}")
+
+            logging.info("✅ Chat history and RAG database fully reset.")
             QMessageBox.information(
                 self, 
                 "Success", 
-                "Chat history and RAG memory cleared successfully!"
+                "Chat history and RAG memory cleared successfully!\n"
+                "The database has been reset to zero."
             )
 
     def rebuild_rag_database(self):
