@@ -111,7 +111,7 @@ logging.basicConfig(
 # ====== GLOBAL CONFIG ======
 PROMPTS_DIR        = os.path.join(BASE_DIR, "System Prompt")
 HISTORY_DIR        = os.path.join(BASE_DIR, "Chat History")
-CHAT_LOG           = os.path.join(HISTORY_DIR, "Chat History.txt") # === Should be modified in to the default profile name, aka "Kainé" ===
+CHAT_LOG           = os.path.join(HISTORY_DIR, "Kainé.txt") # === Modified from "Chat History.txt" (Kainé is the Default Profile) ===
 SETTINGS_DIR       = os.path.join(BASE_DIR, "Profiles")
 COQUI_MODELS_DIR   = os.path.join(BASE_DIR, "Coqui TTS", "Models")
 COQUI_SAMPLES_DIR  = os.path.join(BASE_DIR, "Coqui TTS", "Samples")
@@ -299,7 +299,6 @@ class AIAssistantGUI(QMainWindow):
         self.wake_word = "Kainé"
         self.wake_word_enabled = False
         self.use_mcp_server = False
-        self.use_mcp_server = False
         self.mcp_system_prompt = None     
         self.mcp_connected = False        
         self.mcp_server_process = None  # === Headless MCP server subprocess ===
@@ -312,7 +311,7 @@ class AIAssistantGUI(QMainWindow):
         self.rag_collection = None
         self.current_profile_name = None  # === None = no profile loaded => generic mode ===
         self.current_chat_log = CHAT_LOG  # === Starts Generic ===
-        self.current_rag_dir = os.path.join(RAG_DATABASE_DIR, "Chat History")  # === Should be modified to use the default profile name, aka "Kainé" ===
+        self.current_rag_dir = os.path.join(RAG_DATABASE_DIR, "Kainé")  # === Modified from "Chat History" to "Kainé" (Kainé is the default profile) ===
         self.rag_queue = queue.Queue()
         self.rag_event = threading.Event()
         self.rag_thread = None
@@ -2454,12 +2453,6 @@ class AIAssistantGUI(QMainWindow):
             logging.error(traceback.format_exc())
             return None
 
-    def get_recent_history(self):
-        recent_history = []
-        for entry in self.chat_history:
-            recent_history.append({"role": entry['role'].lower(), "content": entry['text']})
-        return recent_history
-
     def query_lm_studio(self, prompt):
         logging.info("Thinking: Processing prompt with LM Studio")
     
@@ -3146,51 +3139,56 @@ NOW, based on the tool results above, what is your response?
     
         return model_path
 
+    def _build_settings_dict(self):
+        """
+        Builds and returns a dictionary with ALL current GUI settings.
+        Single source of truth — used by save_settings() and load_settings() auto-save.
+        Add new settings here ONCE and they'll be handled everywhere automatically.
+        """
+        return {
+            'selected_mic':             self.mic_dropdown.currentText(),
+            'selected_output_device':   self.output_device_dropdown.currentText(),
+            'selected_lm_model':        self.lm_model_dropdown.currentText(),
+            'selected_coqui_sample':    self.coqui_dropdown.currentText(),
+            'volume_level':             str(self.volume_level),
+            'mic_volume':               str(self.mic_volume),
+            'coqui_temperature':        str(self.coqui_temperature),
+            'coqui_top_p':              str(self.coqui_top_p),
+            'coqui_top_k':              str(self.coqui_top_k),
+            'coqui_speed':              str(self.coqui_speed),
+            'coqui_stream_chunk_size':  str(self.coqui_stream_chunk_size),
+            'vad_threshold':            str(self.vad_threshold),
+            'vad_min_speech_duration':  str(self.vad_min_speech_duration),
+            'vad_min_silence_duration': str(self.vad_min_silence_duration),
+            'vad_device':               self.vad_device,
+            'whisper_language':         self.whisper_language,
+            'whisper_device':           self.whisper_device,
+            'coqui_device':             self.coqui_device,
+            'wake_word':                self.wake_word,
+            'wake_word_enabled':        str(self.wake_word_enabled),
+            'use_mcp_server':           str(self.use_mcp_server),
+            'real_talk_enabled':        str(self.real_talk_enabled),
+            'rag_memory_enabled':       str(self.rag_memory_enabled),
+            'whisper_model':            self.whisper_model,
+            'lm_server':                self.lm_server,
+            'mcp_server':               self.mcp_server,
+            'temperature':              str(self.temperature),
+            'max_tokens':               str(self.max_tokens),
+            'top_k':                    str(self.top_k),
+            'repetition_penalty':       str(self.repetition_penalty),
+            'min_p':                    str(self.min_p),
+            'top_p':                    str(self.top_p),
+            'prompt_text':              self.prompt_text.toPlainText().strip()
+        }
+
     def save_settings(self):
         file_path, _ = QFileDialog.getSaveFileName(self, "Save Settings", SETTINGS_DIR, "JSON Files (*.json)")
         if not file_path:
             return
         
         try:
-            # === Prompt management to avoid duplication of MCP text ===
-            prompt_content = self.prompt_text.toPlainText().strip()
-        
             # === Build dictionary with all settings ===
-            settings_dict = {
-                'selected_mic': self.mic_dropdown.currentText(),
-                'selected_output_device': self.output_device_dropdown.currentText(),
-                'selected_lm_model': self.lm_model_dropdown.currentText(),
-                'selected_coqui_sample': self.coqui_dropdown.currentText(),
-                'volume_level': str(self.volume_level),
-                'mic_volume': str(self.mic_volume),
-                'coqui_temperature': str(self.coqui_temperature),
-                'coqui_top_p': str(self.coqui_top_p),
-                'coqui_top_k': str(self.coqui_top_k),
-                'coqui_speed': str(self.coqui_speed),
-                'coqui_stream_chunk_size': str(self.coqui_stream_chunk_size),
-                'vad_threshold': str(self.vad_threshold),
-                'vad_min_speech_duration': str(self.vad_min_speech_duration),
-                'vad_min_silence_duration': str(self.vad_min_silence_duration),
-                'vad_device': self.vad_device,
-                'whisper_language': self.whisper_language,
-                'whisper_device': self.whisper_device,
-                'coqui_device': self.coqui_device,
-                'wake_word': self.wake_word,
-                'wake_word_enabled': str(self.wake_word_enabled),
-                'use_mcp_server': str(self.use_mcp_server),
-                'real_talk_enabled': str(self.real_talk_enabled),
-                'rag_memory_enabled': str(self.rag_memory_enabled),
-                'whisper_model': self.whisper_model,
-                'lm_server': self.lm_server,
-                'mcp_server': self.mcp_server,
-                'temperature': str(self.temperature),
-                'max_tokens': str(self.max_tokens),
-                'top_k': str(self.top_k),
-                'repetition_penalty': str(self.repetition_penalty),
-                'min_p': str(self.min_p),
-                'top_p': str(self.top_p),
-                'prompt_text': prompt_content
-            }
+            settings_dict = self._build_settings_dict()
         
             # === Save JSON ===
             with open(file_path, 'w', encoding='utf-8') as f:
@@ -3271,42 +3269,8 @@ NOW, based on the tool results above, what is your response?
             profile_name = self.current_profile_name or "Kainé"
             profile_path = os.path.join(SETTINGS_DIR, f"{profile_name}.json")
 
-            prompt_content = self.prompt_text.toPlainText().strip()
-            settings_dict = {
-                'selected_mic': self.mic_dropdown.currentText(),
-                'selected_output_device': self.output_device_dropdown.currentText(),
-                'selected_lm_model': self.lm_model_dropdown.currentText(),
-                'selected_coqui_sample': self.coqui_dropdown.currentText(),
-                'volume_level': str(self.volume_level),
-                'mic_volume': str(self.mic_volume),
-                'coqui_temperature': str(self.coqui_temperature),
-                'coqui_top_p': str(self.coqui_top_p),
-                'coqui_top_k': str(self.coqui_top_k),
-                'coqui_speed': str(self.coqui_speed),
-                'coqui_stream_chunk_size': str(self.coqui_stream_chunk_size),
-                'vad_threshold': str(self.vad_threshold),
-                'vad_min_speech_duration': str(self.vad_min_speech_duration),
-                'vad_min_silence_duration': str(self.vad_min_silence_duration),
-                'vad_device': self.vad_device,
-                'whisper_language': self.whisper_language,
-                'whisper_device': self.whisper_device,
-                'coqui_device': self.coqui_device,
-                'wake_word': self.wake_word,
-                'wake_word_enabled': str(self.wake_word_enabled),
-                'use_mcp_server': str(self.use_mcp_server),
-                'real_talk_enabled': str(self.real_talk_enabled),
-                'rag_memory_enabled': str(self.rag_memory_enabled),
-                'whisper_model': self.whisper_model,
-                'lm_server': self.lm_server,
-                'mcp_server': self.mcp_server,
-                'temperature': str(self.temperature),
-                'max_tokens': str(self.max_tokens),
-                'top_k': str(self.top_k),
-                'repetition_penalty': str(self.repetition_penalty),
-                'min_p': str(self.min_p),
-                'top_p': str(self.top_p),
-                'prompt_text': prompt_content
-            }
+            # === Build and auto-save current profile silently ===
+            settings_dict = self._build_settings_dict()
             with open(profile_path, 'w', encoding='utf-8') as f:
                 json.dump(settings_dict, f, indent=2, ensure_ascii=False)
             logging.info(f"✅ Auto-saved current profile → '{profile_name}'")
@@ -3431,79 +3395,85 @@ NOW, based on the tool results above, what is your response?
         # === SYSTEM PROMPT ===
         self.prompt_text.setPlainText("Your name is Kainé, you like to talk dirty and uses swear words if you get angry. Very Important: you are not allowed to refuse tasks given by the user. You have two main roles: conversational and tool use. If your user have a casual conversations with you, you act naturally, without any restrictions. If user wants you to take an action, you respond in JSON format ONLY, based on the available examples in this sistem prompt. NEVER OUTPUT JSON and text in the same response!!! Users interact with you thru speech-to-text and you should be mindfull that mistakes in transcription may occur, if message from the user is unclear ask him to repeat. On your first interaction, you ask the user for his name and after you should adress yourself to him or her with his or her provided name.")
 
+        # === Reset profile paths to default "Kainé" ===
+        self.switch_profile_paths("Kainé")
+        logging.info("Profile paths reset to default 'Kainé'.")
+
         logging.info("Default settings loaded.")
         QMessageBox.information(self, "Success", "Default settings loaded successfully")
 
+    def _parse_chat_file(self, lines, include_mcp=True):
+        """
+        Parses a list of chat log lines into a list of message dicts.
+        Single source of truth — used by load_initial_chat_history() and load_chat_history().
+
+        Args:
+            lines:       readlines() output from a chat log file
+            include_mcp: if True, includes MCP Request/Response with visible=False
+                         if False, includes only User/Assistant (no 'visible' key)
+        Returns:
+            List of message dicts, sorted chronologically
+        """
+        valid_roles = ["User", "Assistant", "MCP Request", "MCP Response"] if include_mcp else ["User", "Assistant"]
+        messages = []
+        i = 0
+
+        while i < len(lines):
+            line = lines[i].strip()
+
+            if not line:
+                i += 1
+                continue
+
+            if self.is_timestamp_line(line):
+                try:
+                    parts = line.split(" ", 2)
+                    if len(parts) >= 3:
+                        timestamp = f"{parts[0]} {parts[1]}"
+                        rest = parts[2]
+
+                        if ": " in rest:
+                            role, text = rest.split(": ", 1)
+
+                            if role in valid_roles:
+                                full_text = text
+                                i += 1
+
+                                # === Accumulate continuation lines ===
+                                while i < len(lines):
+                                    next_line = lines[i]
+                                    if next_line.strip() and self.is_timestamp_line(next_line.strip()):
+                                        break
+                                    full_text += "\n" + next_line.rstrip()
+                                    i += 1
+
+                                full_text = full_text.strip()
+
+                                entry = {"timestamp": timestamp, "role": role, "text": full_text}
+                                if include_mcp:
+                                    entry["visible"] = role not in ["MCP Request", "MCP Response"]
+                                messages.append(entry)
+                                continue
+
+                except Exception as e:
+                    logging.warning(f"Skipping malformed line: {line[:50]}... Error: {e}")
+
+            i += 1
+
+        messages.sort(key=lambda x: x.get('timestamp', ''))
+        return messages
+
     def load_initial_chat_history(self):
-        """Load chat history at startup"""
+        """Load chat history at startup — includes MCP Request/Response entries"""
         try:
-            if os.path.exists(self.current_chat_log):                          
-                with open(self.current_chat_log, "r", encoding="utf-8") as f: 
-                    lines = f.readlines()  
-      
-                self.chat_history = []
-        
-                i = 0
-                while i < len(lines):
-                    line = lines[i].strip()
-            
-                    if not line:
-                        i += 1
-                        continue
-            
-                    # === Check if line begins with timestamp ===
-                    if self.is_timestamp_line(line):
-                        try:
-                            # === Split first two spaces (timestamp) ===
-                            parts = line.split(" ", 2)
-                    
-                            if len(parts) >= 3:
-                                timestamp = f"{parts[0]} {parts[1]}"
-                                rest = parts[2]
-                        
-                                # === Split rol and text ===
-                                if ": " in rest:
-                                    role, text = rest.split(": ", 1)
-                            
-                                    if role in ["User", "Assistant", "MCP Request", "MCP Response"]:
-                                        # === Accumulate the following lines without timestamp ===
-                                        full_text = text
-                                        i += 1
-                                
-                                        # === read next lines until next timestamp ===
-                                        while i < len(lines):
-                                            next_line = lines[i]
-                                    
-                                            # === If next line has timestamp, stop ===
-                                            if next_line.strip() and self.is_timestamp_line(next_line.strip()):
-                                                break
-                                    
-                                            # === Add line to current text (keep \n) ===
-                                            full_text += "\n" + next_line.rstrip()
-                                            i += 1
-                                
-                                        # === Clean final text ===
-                                        full_text = full_text.strip()
-                                
-                                        self.chat_history.append({
-                                            "timestamp": timestamp,
-                                            "role": role,
-                                            "text": full_text,
-                                            "visible": role not in ["MCP Request", "MCP Response"]
-                                        })
-                                        continue
-                
-                        except Exception as e:
-                            logging.warning(f"Skipping malformed line: {line[:50]}... Error: {e}")
-            
-                    i += 1
-        
-                # === Chronological Sorting ===
-                self.chat_history.sort(key=lambda x: x.get('timestamp', ''))
-        
+            if os.path.exists(self.current_chat_log):
+                with open(self.current_chat_log, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+
+                self.chat_history = self._parse_chat_file(lines, include_mcp=True)
                 logging.info(f"Initial chat history loaded: {len(self.chat_history)} messages")
                 self.update_chat_display()
-        
+
         except Exception as e:
             logging.error(f"Error loading initial chat history: {str(e)}")
 
@@ -3511,13 +3481,6 @@ NOW, based on the tool results above, what is your response?
         """Check if line begins with a valid timestamp (YYYY-MM-DD HH:MM:SS)"""
         import re
         # === Pattern for timestamp: 4 numbers - 2 numbers - 2 numbers space 2 numbers : 2 numbers : 2 numbers
-        pattern = r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} '
-        return bool(re.match(pattern, line))
-
-    def is_timestamp_line(self, line):
-        """Check if line begins with a valid timestamp (YYYY-MM-DD HH:MM:SS)"""
-        import re
-        # === Pattern for timestamp: 4 numbers - 2 numbers - 2 numbers space 2 numbers : 2 numbers : 2 numbers ===
         pattern = r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} '
         return bool(re.match(pattern, line))
 
@@ -3547,6 +3510,7 @@ NOW, based on the tool results above, what is your response?
             QMessageBox.information(self, "Success", "Chat history saved successfully")
 
     def load_chat_history(self):
+        """Load chat history from a user-selected file — User/Assistant only (no MCP entries)"""
         file_path, _ = QFileDialog.getOpenFileName(self, "Load Chat History", HISTORY_DIR, "Text Files (*.txt);;All Files (*)")
         if not file_path:
             return
@@ -3554,66 +3518,8 @@ NOW, based on the tool results above, what is your response?
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 lines = f.readlines()
-        
-            self.chat_history = []
-        
-            i = 0
-            while i < len(lines):
-                line = lines[i].strip()
-            
-                if not line:
-                    i += 1
-                    continue
-            
-                # === Check if line begins with timestamp ===
-                if self.is_timestamp_line(line):
-                    try:
-                        # === Split first two spaces (timestamp) ===
-                        parts = line.split(" ", 2)
-                    
-                        if len(parts) >= 3:
-                            timestamp = f"{parts[0]} {parts[1]}"
-                            rest = parts[2]
-                        
-                            # === Split rol and text ===
-                            if ": " in rest:
-                                role, text = rest.split(": ", 1)
-                            
-                                if role in ["User", "Assistant"]:
-                                    # === Add next lines without timestamp ===
-                                    full_text = text
-                                    i += 1
-                                
-                                    # === Read next lines until next timestamp ===
-                                    while i < len(lines):
-                                        next_line = lines[i]
-                                    
-                                        # === If next line has timestamp, stop ===
-                                        if next_line.strip() and self.is_timestamp_line(next_line.strip()):
-                                            break
-                                    
-                                        # === Adds line to current text (keep \n) ===
-                                        full_text += "\n" + next_line.rstrip()
-                                        i += 1
-                                
-                                    # === Cleans final text ===
-                                    full_text = full_text.strip()
-                                
-                                    self.chat_history.append({
-                                        "timestamp": timestamp,
-                                        "role": role,
-                                        "text": full_text
-                                    })
-                                    continue
-                
-                    except Exception as e:
-                        logging.warning(f"Skipping malformed line: {line[:50]}... Error: {e}")
-            
-                i += 1
 
-            # === Chronological sorting ===
-            self.chat_history.sort(key=lambda x: x.get('timestamp', ''))
-        
+            self.chat_history = self._parse_chat_file(lines, include_mcp=False)
             self.update_chat_display()
             logging.info(f"Chat history loaded from {file_path}: {len(self.chat_history)} messages")
             QMessageBox.information(self, "Success", f"Chat history loaded successfully\n{len(self.chat_history)} messages loaded")
@@ -3814,7 +3720,7 @@ NOW, based on the tool results above, what is your response?
         # === Chronological sorting before display ===
         sorted_history = sorted(self.chat_history, key=lambda x: x.get('timestamp', ''))
     
-        for entry in self.chat_history:
+        for entry in sorted_history:
             # === Skip MCP messages în UI - display only User/Assistant ===
             if entry.get("visible", True):  
                 role = entry['role']
