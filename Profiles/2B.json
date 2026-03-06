@@ -1,7 +1,7 @@
 {
   "selected_mic": "0: Microsoft Sound Mapper - Input",
   "selected_output_device": "3: Microsoft Sound Mapper - Output",
-  "selected_lm_model": "qwen/qwen3-vl-4b",
+  "selected_lm_model": "qwen2.5-7b-instruct-1m",
   "selected_coqui_sample": "EN 2B (Kira Buckland).wav",
   "volume_level": "50",
   "mic_volume": "100",
@@ -19,7 +19,7 @@
   "coqui_device": "cuda",
   "wake_word": "Two Bee",
   "wake_word_enabled": "False",
-  "use_mcp_server": "False",
+  "use_mcp_server": "True",
   "real_talk_enabled": "False",
   "rag_memory_enabled": "True",
   "whisper_model": "small",
