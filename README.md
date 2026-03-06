@@ -54,7 +54,7 @@ cuDNN 9.1.2: ```https://developer.nvidia.com/cudnn``` (requires free NVIDIA acco
  Step 4 - Install LM Studio
 
 Download and install LM Studio: ```https://lmstudio.ai```
-I recommend starting with ```ministral-3-14b-instruct-2512_Q4_K_M.gguf``` model, because in my case it offered the best results. To download go to LM-Studio Model Search tab, or hit ```ctrl + shift + M```. 
+I recommend starting with ```qwen2.5-7b-instruct-1m Q4_K_M.gguf``` model, because in my case it offered the best results. To download go to LM-Studio Model Search tab, or hit ```ctrl + shift + M```. 
 Next go to ```Developer/Local Server``` tab, turn ON the local server, open ```server settings``` and turn ON ```enable CORS```, ```JIT Model loading``` and ```Only Keep Last JIT Model Loaded```.
 Next time you reboot your PC LM-Studio will auto-start in sys tray.
 
@@ -150,7 +150,7 @@ Full pinned dependency list: ```Dependencies/Requirements.txt```
 
 🚀 First Launch 🚀
 
-1. Make sure LM Studio is running, the local server is started and that you have at least one model downloaded, for starters i highly recommend ```qwen2.5-7b-instruct-1m@q4_k_m``` a verry capable model for its size
+1. Make sure LM Studio is running, the local server is started and that you have at least one model downloaded, for starters i recommend ```qwen2.5-7b-instruct-1m Q4_K_M.gguf``` a verry capable model for its size
 2. Run the main application:  ```python "Advanced STS Local AI Assistant.py"``` or just double-click ```be patient here, it has to load Heavy Dependencies😊```
 3. Select your microphone and audio output device from the dropdowns ```by default it uses Microsoft Sound Mapper for input/output```
 4. Select your preferred Whisper model. Use "Medium" for best speed/accuracy balance 
