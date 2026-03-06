@@ -309,7 +309,7 @@ class AIAssistantGUI(QMainWindow):
         self.rag_embedder = None
         self.rag_client = None
         self.rag_collection = None
-        self.current_profile_name = None  # === None = No profile is Loadad => (if no profile is loaded your conversation is saved in the default profile "Kainé") ===
+        self.current_profile_name = None  # === None = no profile loaded => generic mode ===
         self.current_chat_log = CHAT_LOG  # === Starts Generic ===
         self.current_rag_dir = os.path.join(RAG_DATABASE_DIR, "Kainé")  # === Modified from "Chat History" to "Kainé" (Kainé is the default profile) ===
         self.rag_queue = queue.Queue()
@@ -2011,99 +2011,114 @@ class AIAssistantGUI(QMainWindow):
         except Exception as e:
             logging.error(f"Critical RAG Worker Error: {str(e)}")
 
-    def query_rag_memory(self, query_text, top_k=4):  # === Changed from 12 to 4 ===
+    def query_rag_memory(self, query_text, top_k=6, recent_lines=None):
         """
-        RAG memory query - optimized version
-        Returns: 4 relevant messages (balanced User/Assistant)
+        RAG memory query.
+        Args:
+            query_text:   current user message
+            top_k:        max messages to return — half User, half Assistant
+            recent_lines: set of normalized texts already in recent_context
+                          RAG skips these to avoid duplicates in the LLM prompt
+        Returns: formatted string with relevant past messages, deduplicated
         """
         try:
             if not self.rag_memory_enabled or not self.rag_embedder or self.rag_collection.count() == 0:
                 return ""
-        
-            # === Generating embedding for query ===
+
+            if recent_lines is None:
+                recent_lines = set()
+
+            # === Generate embedding for query ===
             query_embedding = self.rag_embedder.encode(query_text).tolist()
-        
-            # === ChromaDB search (we are looking for more so we can balance) ===
+
+            # === Fetch top_k*3 so we have room to filter and still balance ===
             results = self.rag_collection.query(
                 query_embeddings=[query_embedding],
-                n_results=min(top_k * 2, self.rag_collection.count())  # === *2 for filtering ===
+                n_results=min(top_k * 3, self.rag_collection.count())
             )
-        
+
             if not results['documents'] or not results['documents'][0]:
                 return ""
-        
-            # ====== SEPARATION BY ROLLS ======
-            user_messages = []
-            assistant_messages = []
-            seen_texts = set()  # === Deduplicate ===
-        
+
+            # ====== COLLECT + FILTER — keep timestamp for sorting ======
+            candidates = []   # list of (timestamp, role, doc_clean)
+            seen_texts = set()
+
             for doc, meta in zip(results['documents'][0], results['metadatas'][0]):
-                role = meta.get('role', 'Unknown')
-            
-                # === Text cleanup: remove emoji and special characters ===
-                import re
-                doc_clean = re.sub(r'[^\w\s,.!?\'-]', '', doc, flags=re.UNICODE)
-                doc_clean = ' '.join(doc_clean.split())  # === Cleanup whitespace ===
-            
-                # === Skip duplicates ===
-                if doc_clean in seen_texts or len(doc_clean.strip()) < 5:
+                role      = meta.get('role', 'Unknown')
+                timestamp = meta.get('timestamp', '')
+
+                # === Only User and Assistant — skip MCP entries ===
+                if role not in ('User', 'Assistant'):
                     continue
-                seen_texts.add(doc_clean)
-            
-                # === Truncate very long messages ===
+
+                # === Text cleanup ===
+                import re
+                doc_clean = re.sub(r"[^\w\s,.!?'-]", '', doc, flags=re.UNICODE)
+                doc_clean = ' '.join(doc_clean.split())
+
+                if not doc_clean.strip() or len(doc_clean.strip()) < 5:
+                    continue
+
                 if len(doc_clean) > 150:
                     doc_clean = doc_clean[:150] + "..."
-            
-                # === Display by roles ===
-                if role == "User":
-                    user_messages.append(doc_clean)
-                elif role == "Assistant":
-                    assistant_messages.append(doc_clean)
-        
-            # ====== BALANCING: 2 User + 2 Assistant ======
-            selected_user = user_messages[:2]  # === Changed from 6 to 2 ===
-            selected_assistant = assistant_messages[:2]  # === Changed from 6 to 2 ===
-        
+
+                # === A: Skip if already in recent_context ===
+                doc_normalized = doc_clean.lower()[:80]
+                if doc_normalized in recent_lines:
+                    logging.debug(f"\U0001f501 RAG dedup skipped (in recent): {doc_clean[:60]}")
+                    continue
+
+                # === Skip internal RAG duplicates ===
+                if doc_clean in seen_texts:
+                    continue
+                seen_texts.add(doc_clean)
+
+                candidates.append((timestamp, role, doc_clean))
+
+            # ====== SORT CHRONOLOGICALLY by timestamp ======
+            candidates.sort(key=lambda x: x[0])
+
+            # ====== BUILD REAL PAIRS in chronological order ======
+            # Walk forward: each User followed by the next Assistant = one pair
+            pairs = []
+            i = 0
+            while i < len(candidates) and len(pairs) < (top_k // 2):
+                ts, role, text = candidates[i]
+                if role == 'User':
+                    # Look for the next Assistant right after this User
+                    if i + 1 < len(candidates) and candidates[i + 1][1] == 'Assistant':
+                        pairs.append((text, candidates[i + 1][2]))
+                        i += 2
+                    else:
+                        i += 1
+                else:
+                    i += 1
+
             # === FINAL FORMATTING ===
             context_parts = []
-        
-            # === We alternate User/Assistant for natural context ===
-            max_pairs = min(len(selected_user), len(selected_assistant))
-        
-            for i in range(max_pairs):
-                context_parts.append(f"User: {selected_user[i]}")
-                context_parts.append(f"Assistant: {selected_assistant[i]}")
-        
-            # === Add the remaining (if there is an imbalance) ===
-            if len(selected_user) > max_pairs:
-                for msg in selected_user[max_pairs:]:
-                    context_parts.append(f"User: {msg}")
-        
-            if len(selected_assistant) > max_pairs:
-                for msg in selected_assistant[max_pairs:]:
-                    context_parts.append(f"Assistant: {msg}")
-        
+            for user_text, assistant_text in pairs:
+                context_parts.append(f"User: {user_text}")
+                context_parts.append(f"Assistant: {assistant_text}")
+
             context = "\n".join(context_parts)
-        
-            # === TOKEN LIMIT CHECK ===
-            max_chars = 800  # Lowered from 2000 (for 4 messages)
+
+            # === TOKEN LIMIT ===
+            max_chars = 2000
             if len(context) > max_chars:
-                # === Truncate to last complete message ===
                 context = context[:max_chars]
                 last_newline = context.rfind('\n')
                 if last_newline > 0:
                     context = context[:last_newline]
-        
-            logging.info(f"✅ RAG: {len(selected_user)} User + {len(selected_assistant)} Assistant messages (~{len(context)//4} tokens)")
-        
+            logging.info(f"✅ RAG: {len(pairs)} pairs (~{len(context)//4} tokens)")
+
             return context
-        
+
         except Exception as e:
             logging.error(f"RAG Query Error: {str(e)}")
             import traceback
             logging.error(traceback.format_exc())
             return ""
-
     def tts_worker(self):
         p = None
         stream = None
@@ -2289,7 +2304,7 @@ class AIAssistantGUI(QMainWindow):
     def load_lm_models(self):
         logging.info("Loading LM Studio models")
         try:
-            base_url = self.lm_server_entry.text().rstrip('/') # === Luam URL-ul din GUI, e mai safe ===
+            base_url = self.lm_server_entry.text().rstrip('/') # === Taking URL from GUI is safer ===
             if not base_url:
                 base_url = "http://127.0.0.1:1234"
                 
@@ -2471,34 +2486,54 @@ class AIAssistantGUI(QMainWindow):
             memory_context = ""
         
             if self.rag_memory_enabled:
-                # === RAG ON: Semantic memory + last 2 recent messages ===
-                rag_context = self.query_rag_memory(prompt, top_k=4)
+                # === RECENT: always 3 pairs (6 messages) for continuity ===
+                recent_context = self.get_recent_conversation(max_pairs=3)
+
+                # === Build dedup set from recent — RAG must not repeat these ===
+                recent_lines = set()
+                if recent_context:
+                    for line in recent_context.splitlines():
+                        text = line.split(": ", 1)[-1].strip().lower()[:80]
+                        if text:
+                            recent_lines.add(text)
+
+                # === RAG: 2 extra pairs from semantic memory, deduplicated ===
+                rag_context = self.query_rag_memory(prompt, top_k=4, recent_lines=recent_lines)
 
                 if rag_context:
                     memory_context += "=== SEMANTIC MEMORY ===\n"
                     memory_context += rag_context + "\n\n"
-                    logging.info("📚 RAG: 4 semantic messages injected")
-
-                # === Last 2 messages ALWAYS — for continuity ===
-                recent_context = self.get_recent_conversation(max_pairs=1)
+                    logging.info("📚 RAG: 2 semantic pairs injected (deduplicated)")
+                    logging.debug(f"📚 RAG CONTENT:\n{rag_context}")
+                else:
+                    logging.info("📚 RAG: no results returned for this query")
 
                 if recent_context:
                     memory_context += "=== RECENT CONTEXT ===\n"
                     memory_context += recent_context + "\n"
-                    logging.info("🕐 Recent: 2 messages injected (continuity)")
+                    logging.info("🕐 Recent: 3 pairs injected (continuity)")
+                    logging.debug(f"🕐 RECENT CONTENT:\n{recent_context}")
 
             else:
-                # === RAG OFF: Fallback to last 4 recent messages ===
-                recent_context = self.get_recent_conversation(max_pairs=2)
+                # === RAG OFF: only 3 recent pairs ===
+                recent_context = self.get_recent_conversation(max_pairs=3)
 
                 if recent_context:
                     memory_context += "=== RECENT CONVERSATION ===\n"
                     memory_context += recent_context + "\n"
-                    logging.info("🕐 Recent: 4 messages injected (RAG disabled)")
+                    logging.info("🕐 Recent: 3 pairs injected (RAG disabled)")
+                    logging.debug(f"🕐 RECENT CONTENT:\n{recent_context}")
          
             # === INJECT MEMORY IN SYSTEM PROMPT ===
             if memory_context:
                 system_prompt += f"\n\n{memory_context}"
+
+            # ====== FULL PROMPT LOGGING (what LLM actually receives) ======
+            logging.debug("=" * 60)
+            logging.debug(f"📤 USER PROMPT:\n{prompt}")
+            logging.debug("-" * 60)
+            logging.debug(f"📤 SYSTEM PROMPT SENT TO LLM:\n{system_prompt}")
+            logging.debug("=" * 60)
 
             base_url = self.lm_server.rstrip('/')
             chat_url = f"{base_url}/v1/chat/completions"
@@ -2889,79 +2924,73 @@ NOW, based on the tool results above, what is your response?
 
     def get_recent_conversation(self, max_pairs=3):
         """
-        Extract the last N pairs (User + Assistant) from the chat history
+        Extract the last N real User→Assistant pairs from chat history.
+        Iterates chronologically in reverse, collecting only adjacent
+        User+Assistant pairs — skips MCP Request/Response entries so
+        they cannot cause index misalignment.
         Args:
-            max_pairs: number pairs User-Assistant (default 3 = 6 total message)
+            max_pairs: number of User→Assistant pairs to return
         Returns:
-            Formatted string with recent conversation
+            Formatted string in chronological order
         """
         try:
             if not self.chat_history:
                 return ""
-        
-            # === Separation by roles ===
-            user_messages = []
-            assistant_messages = []
-        
-            # === REVERSE iteration for latest messages ===
-            for entry in reversed(self.chat_history):
-                role = entry.get('role', 'Unknown')
-                text = entry.get('text', '').strip()
-            
-                # === Skip empty message ===
-                if not text or len(text) < 5:
-                    continue
-            
-                # === Cleanup text (eliminate emoji + special characters) ===
-                import re
-                text_clean = re.sub(r'[^\w\s,.!?\'-]', '', text, flags=re.UNICODE)
-                text_clean = ' '.join(text_clean.split())
-            
-                # === Truncation to 150 characters ===
-                if len(text_clean) > 150:
-                    text_clean = text_clean[:150] + "..."
-            
-                # === Share by roles (most recent first) ===
-                if role == "User" and len(user_messages) < max_pairs:
-                    user_messages.append(text_clean)
-                elif role == "Assistant" and len(assistant_messages) < max_pairs:
-                    assistant_messages.append(text_clean)
-            
-                # === Stop when we have enough pairs ===
-                if len(user_messages) >= max_pairs and len(assistant_messages) >= max_pairs:
-                    break
-        
-            # === Reverse to be in chronological order ===
-            user_messages.reverse()
-            assistant_messages.reverse()
-        
-            # === Alternate conversation building ===
+
+            import re
+            pairs = []
+
+            # === Walk backwards, looking for Assistant then its preceding User ===
+            i = len(self.chat_history) - 1
+            while i >= 0 and len(pairs) < max_pairs:
+                entry = self.chat_history[i]
+                role  = entry.get('role', '')
+                text  = entry.get('text', '').strip()
+
+                # === Found an Assistant message — look backwards for its User ===
+                if role == 'Assistant' and text and len(text) >= 5:
+                    assistant_text = re.sub(r"[^\w\s,.!?'-]", '', text, flags=re.UNICODE)
+                    assistant_text = ' '.join(assistant_text.split())
+                    if len(assistant_text) > 150:
+                        assistant_text = assistant_text[:150] + "..."
+
+                    # === Search backwards for the nearest preceding User message ===
+                    j = i - 1
+                    while j >= 0:
+                        prev = self.chat_history[j]
+                        if prev.get('role') == 'User':
+                            user_text = prev.get('text', '').strip()
+                            user_text = re.sub(r"[^\w\s,.!?'-]", '', user_text, flags=re.UNICODE)
+                            user_text = ' '.join(user_text.split())
+                            if len(user_text) > 150:
+                                user_text = user_text[:150] + "..."
+                            if len(user_text) >= 5:
+                                pairs.append((user_text, assistant_text))
+                            i = j - 1  # === Continue search before this User ===
+                            break
+                        j -= 1
+                    else:
+                        i -= 1  # === No User found, move on ===
+                else:
+                    i -= 1
+
+            # === Reverse to chronological order ===
+            pairs.reverse()
+
             context_parts = []
-            num_pairs = min(len(user_messages), len(assistant_messages))
-        
-            for i in range(num_pairs):
-                context_parts.append(f"User: {user_messages[i]}")
-                context_parts.append(f"Assistant: {assistant_messages[i]}")
-        
-            # === Add the rest if there is an imbalance ===
-            if len(user_messages) > num_pairs:
-                for msg in user_messages[num_pairs:]:
-                    context_parts.append(f"User: {msg}")
-        
-            if len(assistant_messages) > num_pairs:
-                for msg in assistant_messages[num_pairs:]:
-                    context_parts.append(f"Assistant: {msg}")
-        
+            for user_text, assistant_text in pairs:
+                context_parts.append(f"User: {user_text}")
+                context_parts.append(f"Assistant: {assistant_text}")
+
             result = "\n".join(context_parts)
-        
-            logging.info(f"✅ Recent: {len(user_messages)} User + {len(assistant_messages)} Assistant (~{len(result)//4} tokens)")
-        
+
+            logging.info(f"✅ Recent: {len(pairs)} pairs (~{len(result)//4} tokens)")
+
             return result
-        
+
         except Exception as e:
             logging.error(f"Error getting recent conversation: {str(e)}")
             return ""
-
     def append_log(self, role, text, visible=True):
         """
         Add message to chat history
