@@ -1,10 +1,10 @@
 """
 MCP RPC 2.0 Server 0.1.1 Beta
 All core classes merged into a single file.
-Plugins remain separate in Plugins/ for maximum extendability.
+Plugins raman separate in Plugins/ pentru extensibilitate maxima.
 
-Run: python "MCP Server.py"          (GUI mode)
-Run: python "MCP Server.py" --no-gui (CLI mode)
+Run: python "MCP RPC 2.0 Server 0.1.1 Beta.py"         (GUI mode)
+Run: python "MCP RPC 2.0 Server 0.1.1 Beta.py" --no-gui (CLI mode)
 """
 
 import sys
@@ -24,17 +24,17 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel,
 from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont, QPixmap
 
-# ============================================================
-# PATHS
-# ============================================================
+
+# ====== PATHS ======
+
 
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 PLUGINS_DIR = os.path.join(BASE_DIR, "Plugins")
 GRAPHICS_DIR = os.path.join(BASE_DIR, "Graphics")
 
-# ============================================================
-# STYLES
-# ============================================================
+
+# ====== STYLES ======
+
 
 GROUP_STYLE = """
     QGroupBox {
@@ -113,17 +113,13 @@ TEXT_EDIT_STYLE = """
     }
 """
 
-# ============================================================
-# GLOBAL INSTANCES
-# ============================================================
+# ====== GLOBAL INSTANCES ======
 
 _config_manager  = None
 _plugin_manager  = None
-_server_instance = None   # Referinta catre serverul activ (graceful shutdown)
+_server_instance = None   # === Reference to active server (graceful shutdown) ===
 
-# ============================================================
-# CONFIG MANAGER
-# ============================================================
+# ====== CONFIG MANAGER ======
 
 class ConfigManager:
     """Manages configuration for MCP Server and plugins"""
@@ -195,9 +191,7 @@ class ConfigManager:
             else:
                 base[key] = value
 
-# ============================================================
-# BASE PLUGIN
-# ============================================================
+# ====== BASE PLUGIN ======
 
 class BasePlugin(ABC):
     """
@@ -213,10 +207,10 @@ class BasePlugin(ABC):
         self.enabled        = self.manifest.get("enabled", True)
 
         self.name         = self.manifest.get("name", "unknown")
-        self.version      = self.manifest.get("version", "0.0.0")
+        self.version      = self.manifest.get("version", "0.1.1 Beta")
         self.display_name = self.manifest.get("display_name", self.name)
         self.description  = self.manifest.get("description", "")
-        self.author       = self.manifest.get("author", "Unknown")
+        self.author       = self.manifest.get("author", "Nechifor Marian")
 
         logging.info(f"Loaded plugin: {self.display_name} v{self.version}")
 
@@ -232,7 +226,7 @@ class BasePlugin(ABC):
             logging.error(f"Invalid manifest.json: {e}")
             return {}
 
-    # ---------- MCP Methods (obligatorii) ----------
+    # ====== MCP Methods (MANDATORY) ======
 
     @abstractmethod
     def activate(self) -> bool:
@@ -254,7 +248,7 @@ class BasePlugin(ABC):
         """Executa tool-ul primit"""
         pass
 
-    # ---------- Prompt section (optional, recomandat) ----------
+    # ====== Prompt section =====
 
     def get_prompt_section(self) -> str:
         """
@@ -276,7 +270,7 @@ class BasePlugin(ABC):
         section += "\n"
         return section
 
-    # ---------- GUI Methods (optional) ----------
+    # ====== GUI Methods ======
 
     def get_frame_size(self) -> Tuple[int, int]:
         """Dimensiunea frame-ului GUI al plugin-ului (default 380x80)"""
@@ -290,7 +284,7 @@ class BasePlugin(ABC):
         """
         return None
 
-    # ---------- Helpers ----------
+    # ====== Helpers ======
 
     def get_config(self, key: str, default: Any = None) -> Any:
         return self.config_manager.get(f"plugins.{self.name}.{key}", default)
@@ -303,9 +297,7 @@ class BasePlugin(ABC):
         msg = f"[{self.display_name}] {message}"
         getattr(logging, level, logging.info)(msg)
 
-# ============================================================
-# PLUGIN MANAGER
-# ============================================================
+# ====== PLUGIN MANAGER ======
 
 class PluginManager:
     """Discover, load si gestioneaza toate plugin-urile"""
@@ -341,13 +333,13 @@ class PluginManager:
             spec   = importlib.util.spec_from_file_location(f"plugins.{plugin_name}", plugin_file)
             module = importlib.util.module_from_spec(spec)
 
-            # Injectam BasePlugin in modulul plugin-ului ca sa nu fie nevoie sa il importeze
+            # === Injet BasePlugin in plugin module to eliminate the need to import-it ===
             module.BasePlugin = BasePlugin
 
             sys.modules[f"plugins.{plugin_name}"] = module
             spec.loader.exec_module(module)
 
-            # Gasim clasa care mosteneste BasePlugin
+            # === Find Class wich inherits BasePlugin ===
             plugin_class = next(
                 (getattr(module, n) for n in dir(module)
                  if isinstance(getattr(module, n), type)
@@ -423,15 +415,13 @@ class PluginManager:
             "enabled": p.enabled
         } for p in self.plugins.values()]
 
-# ============================================================
-# MCP JSON-RPC 2.0 HANDLER
-# ============================================================
+# ====== MCP JSON-RPC 2.0 HANDLER ======
 
 class MCPHandler(http.server.BaseHTTPRequestHandler):
     """Secure Handler for MCP JSON-RPC 2.0 requests"""
 
     def log_message(self, format, *args):
-        pass   # Suprimam log-ul implicit al BaseHTTPRequestHandler
+        pass   # === Supress BaseHTTPRequestHandler log ===
 
     def do_POST(self):
         try:
@@ -512,7 +502,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         result = dispatch[method]()
         return {"jsonrpc": "2.0", "result": result, "id": request_id}
 
-    # ---------- Handlers ----------
+    # === Handlers ===
 
     def _handle_initialize(self, params):
         return {
@@ -521,7 +511,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 "prompts": {"listChanged": False},
                 "tools":   {"listChanged": False}
             },
-            "serverInfo": {"name": "MCP Server (Plugin-Based)", "version": "0.1.1"}
+            "serverInfo": {"name": "MCP Server (Plugin-Based)", "version": "0.1.1 Beta"}
         }
 
     def _handle_prompts_list(self):
@@ -569,7 +559,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         enabled = [p.display_name for p in plugins if p.enabled]
         return {
             "status": "running",
-            "version": "1.4",
+            "version": "0.1.1 Beta",
             "plugins_total": len(plugins),
             "plugins_enabled": len(enabled),
             "enabled_plugins": enabled
@@ -591,17 +581,13 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         threading.Thread(target=_do_shutdown, daemon=True).start()
         return {"message": "Server shutting down gracefully", "ok": True}
 
-# ============================================================
-# THREADED TCP SERVER
-# ============================================================
+# ====== THREADED TCP SERVER ======
 
 class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     allow_reuse_address = True
     daemon_threads      = True
 
-# ============================================================
-# SERVER THREAD (GUI mode)
-# ============================================================
+# ====== SERVER THREAD (GUI mode) ======
 
 class ServerThread(QThread):
     log_signal = pyqtSignal(str)
@@ -633,9 +619,7 @@ class ServerThread(QThread):
             self.server.server_close()
         self.log_signal.emit("Server stopped")
 
-# ============================================================
-# MAIN GUI
-# ============================================================
+# ====== MAIN GUI ======
 
 class MCPServerGUI(QMainWindow):
 
@@ -660,7 +644,7 @@ class MCPServerGUI(QMainWindow):
 
         QTimer.singleShot(300, self._check_headless_server)
 
-    # ---------- UI Setup ----------
+    # ===== UI Setup ======
 
     def _init_ui(self):
         self.setWindowTitle("= MCP RPC 2.0 Server 0.1.1 Beta =")
@@ -674,11 +658,11 @@ class MCPServerGUI(QMainWindow):
     def _create_layout(self):
         row, col = 0, 0
 
-        # MCP Server frame
+        # === MCP Server frame ===
         self.grid.addWidget(self._create_mcp_frame(), row, col)
         col += 1
 
-        # Plugin frames
+        # === Plugin frames ===
         for info in self.plugin_manager.get_plugin_list():
             plugin = self.plugin_manager.get_plugin(info['name'])
             if not plugin:
@@ -696,7 +680,7 @@ class MCPServerGUI(QMainWindow):
         if col > 0:
             row += 1
 
-        # Log frame (full width)
+        # === Log frame (full width) ===
         self.grid.addWidget(self._create_log_frame(), row, 0, 1, 2)
 
         self.adjustSize()
@@ -798,7 +782,7 @@ class MCPServerGUI(QMainWindow):
         logging.getLogger().addHandler(handler)
         logging.getLogger().setLevel(logging.INFO)
 
-    # ---------- Server Actions ----------
+    # ====== Server Actions ======
 
     def _check_headless_server(self):
         """La pornire verifica daca serverul headless ruleaza deja pe port"""
@@ -887,7 +871,7 @@ class MCPServerGUI(QMainWindow):
         else:
             print(message)
 
-    # ---------- Debug Methods ----------
+    # ====== Debug Methods ======
 
     def _rpc_call(self, method: str, params: Dict = None) -> Optional[str]:
         host = self.config_manager.get("server_host", "127.0.0.1")
@@ -933,9 +917,7 @@ class MCPServerGUI(QMainWindow):
         except Exception as e:
             self.log(f"Invoke failed: {e}\n")
 
-# ============================================================
-# CLI MODE
-# ============================================================
+# ====== CLI MODE ======
 
 def run_cli_mode():
     global _config_manager, _plugin_manager, _server_instance
@@ -976,9 +958,7 @@ def run_cli_mode():
         server.server_close()
         print("Goodbye!")
 
-# ============================================================
-# ENTRY POINT
-# ============================================================
+# ====== ENTRY POINT ======
 
 def main():
     if "--no-gui" in sys.argv or "--cli" in sys.argv:
