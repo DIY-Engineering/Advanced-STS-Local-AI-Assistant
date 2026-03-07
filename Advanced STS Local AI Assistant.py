@@ -306,8 +306,8 @@ class TextHandler(logging.Handler):
 class AIAssistantGUI(QMainWindow):
     # ===== THREAD SAFETY SIGNALS =====
     show_warning_signal  = pyqtSignal(str, str)
-    vu_input_signal      = pyqtSignal(int)   # VU Meter microphone — thread-safe
-    vu_output_signal     = pyqtSignal(int)   # VU Meter TTS output — thread-safe
+    vu_input_signal      = pyqtSignal(int)   # === VU Meter microphone — thread-safe ===
+    vu_output_signal     = pyqtSignal(int)   # === VU Meter TTS output — thread-safe ===
 
     def __init__(self):
         super().__init__()
@@ -2391,7 +2391,7 @@ class AIAssistantGUI(QMainWindow):
     def load_lm_models(self):
         logging.info("Loading LM Studio models")
         try:
-            base_url = self.lm_server_entry.text().rstrip('/') # === Luam URL-ul din GUI, e mai safe ===
+            base_url = self.lm_server_entry.text().rstrip('/') # === Take URL-ul from GUI, safer this way ===
             if not base_url:
                 base_url = "http://127.0.0.1:1234"
                 
@@ -2728,7 +2728,7 @@ class AIAssistantGUI(QMainWindow):
             init_result = self.mcp_request_with_retry("initialize", {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "clientInfo": {"name": "Advanced-STS-Local-AI-Assistant", "version": "0.1.0 Beta"}
+                "clientInfo": {"name": "Advanced-STS-Local-AI-Assistant", "version": "0.1.1 Beta"}
             })
             
             if not init_result:
