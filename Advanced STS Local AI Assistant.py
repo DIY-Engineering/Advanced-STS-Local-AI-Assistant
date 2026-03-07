@@ -33,7 +33,7 @@ from chromadb.config import Settings
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QComboBox, 
                              QPushButton, QTextEdit, QSlider, QRadioButton, QLineEdit,
                              QGroupBox, QFileDialog, QMessageBox, QButtonGroup)
-from PyQt5.QtCore import Qt, pyqtSignal, QObject, QTimer
+from PyQt5.QtCore import Qt, pyqtSignal, QObject, QTimer, QThread
 from PyQt5.QtGui import QFont, QPalette, QColor, QPixmap, QPainter, QBrush, QTextCursor, QPen
 
 # === Fix encoding for console ===
@@ -208,6 +208,73 @@ class VUMeter(QWidget):
             painter.setBrush(QBrush(color, Qt.SolidPattern))  # === Fill solid ===
             painter.drawRect(x, 0, self.segment_width, self.segment_height)
 
+class SystemMonitorWorker(QObject):
+    """
+    Worker thread for system resource monitoring.
+    Runs independently from GUI thread — emits metrics via signal every 0.5s.
+    GPU is queried every 4th tick (~2s) to avoid blocking on nvidia-smi.
+    """
+    metrics_ready = pyqtSignal(float, float, float, float, float, float)
+    # args: cpu_percent, sram_percent, sram_total_gb,
+    #       gpu_util, vram_percent, vram_total_gb
+
+    def __init__(self):
+        super().__init__()
+        self._running = False
+        self._tick = 0
+
+        # === Cached GPU values — updated every 4th tick ===
+        self._gpu_util     = -1.0   # -1 = N/A
+        self._vram_percent = -1.0
+        self._vram_total   = -1.0
+
+    def start_monitoring(self):
+        """Entry point — called by QThread.started signal"""
+        self._running = True
+        while self._running:
+            try:
+                # ====== CPU & RAM — every tick (0.5s) ======
+                cpu_percent   = psutil.cpu_percent(interval=None)
+                ram           = psutil.virtual_memory()
+                sram_percent  = ram.percent
+                sram_total_gb = ram.total / (1024 ** 3)
+
+                # ====== GPU — every 4th tick (~2s) ======
+                self._tick += 1
+                if self._tick >= 4:
+                    self._tick = 0
+                    try:
+                        output = subprocess.check_output(
+                            ['nvidia-smi',
+                             '--query-gpu=utilization.gpu,memory.used,memory.total',
+                             '--format=csv,noheader,nounits'],
+                            timeout=1
+                        ).decode().strip()
+                        parts = output.split(',')
+                        gpu_util     = float(parts[0].strip())
+                        vram_used    = float(parts[1].strip())
+                        vram_total   = float(parts[2].strip())
+                        vram_percent = (vram_used / vram_total * 100) if vram_total > 0 else 0
+                        self._gpu_util     = gpu_util
+                        self._vram_percent = vram_percent
+                        self._vram_total   = vram_total / 1024  # MB → GB
+                    except Exception:
+                        pass  # Keep previous cached values
+
+                self.metrics_ready.emit(
+                    cpu_percent, sram_percent, sram_total_gb,
+                    self._gpu_util, self._vram_percent, self._vram_total
+                )
+
+            except Exception as e:
+                logging.error(f"SystemMonitorWorker error: {e}")
+
+            time.sleep(0.5)
+
+    def stop(self):
+        self._running = False
+
+
 class RefreshableComboBox(QComboBox):
     """QComboBox calls refresh function when open"""
     def __init__(self, parent=None):
@@ -237,8 +304,10 @@ class TextHandler(logging.Handler):
             print(f"Error in TextHandler: {str(e)}")
 
 class AIAssistantGUI(QMainWindow):
-    # ===== THREAD SAFETY SIGNAL =====
-    show_warning_signal = pyqtSignal(str, str)
+    # ===== THREAD SAFETY SIGNALS =====
+    show_warning_signal  = pyqtSignal(str, str)
+    vu_input_signal      = pyqtSignal(int)   # VU Meter microphone — thread-safe
+    vu_output_signal     = pyqtSignal(int)   # VU Meter TTS output — thread-safe
 
     def __init__(self):
         super().__init__()
@@ -250,6 +319,8 @@ class AIAssistantGUI(QMainWindow):
         
         # === Connect the warning signal to the safe function ===
         self.show_warning_signal.connect(self.show_thread_safe_warning)
+        self.vu_input_signal.connect(lambda lvl: self.vu_meter_input.set_level(lvl))
+        self.vu_output_signal.connect(lambda lvl: self.vu_meter_output.set_level(lvl))
 
         screen = QApplication.primaryScreen().geometry()
         x = (screen.width() - 1326) // 2
@@ -351,10 +422,9 @@ class AIAssistantGUI(QMainWindow):
         self.auto_refresh_lm_models()
         self.load_initial_chat_history()
         self.ensure_default_profile() # === Ensures that always is an active profile ===
+        # === NOTE: MCP init triggered via radio signal in _apply_settings_to_gui ===
+        # === No explicit call here — would cause double init on startup ===
         logging.info("Starting application")
-        
-        if self.use_mcp_server:
-            QTimer.singleShot(1000, self.initialize_mcp_connection)
 
         self.tts_thread = threading.Thread(target=self.tts_worker, daemon=True)
         self.tts_thread.start()
@@ -364,10 +434,13 @@ class AIAssistantGUI(QMainWindow):
         self.rag_thread.start()
         logging.info("RAG worker thread started.")
 
-        # === Timer for updating resources ===
-        self.resource_timer = QTimer(self)
-        self.resource_timer.timeout.connect(self.update_resources)
-        self.resource_timer.start(1000)  # === Update every second ===
+        # === System Monitor — dedicated worker thread, 0.5s refresh ===
+        self.monitor_worker = SystemMonitorWorker()
+        self.monitor_thread = QThread()
+        self.monitor_worker.moveToThread(self.monitor_thread)
+        self.monitor_thread.started.connect(self.monitor_worker.start_monitoring)
+        self.monitor_worker.metrics_ready.connect(self.update_resources)
+        self.monitor_thread.start()
 
     def show_thread_safe_warning(self, title, message):
         """This function runs on the Main Thread and displays the message without crashing the application."""
@@ -1125,6 +1198,18 @@ class AIAssistantGUI(QMainWindow):
         """)
         self.start_stop_button.clicked.connect(self.toggle_recording)
         
+        # === Profile Image (64x64) ===
+        self.profile_image_label = QLabel(system_frame)
+        self.profile_image_label.setGeometry(230, 35, 64, 64)
+        self.profile_image_label.setStyleSheet("border: none; background-color: transparent;")
+        self.profile_image_label.setAlignment(Qt.AlignCenter)
+
+        # === Profile Name Label ===
+        self.profile_name_label = QLabel("", system_frame)
+        self.profile_name_label.setGeometry(214, 100, 100, 20)
+        self.profile_name_label.setStyleSheet("color: #FFFF96; border: none; font-weight: bold; font-size: 10pt;")
+        self.profile_name_label.setAlignment(Qt.AlignCenter)
+
         sys_mon_label = QLabel("= System Monitor =", system_frame)
         sys_mon_label.setGeometry(66, 124, 150, 20)
         sys_mon_label.setStyleSheet("color: #FFFFFF; border: none; font-weight: bold;")
@@ -1200,80 +1285,50 @@ class AIAssistantGUI(QMainWindow):
         radio_real_talk_no.toggled.connect(lambda checked: setattr(self, 'real_talk_enabled', False) if checked else None)
         self.real_talk_group.addButton(radio_real_talk_no, 1)
 
-    def update_resources(self):
-        """Resource update function with dynamic color coding"""
+    def update_resources(self, cpu_percent, sram_percent, sram_total_gb,
+                         gpu_util, vram_percent, vram_total_gb):
+        """
+        GUI slot — receives pre-computed metrics from SystemMonitorWorker via signal.
+        Runs on GUI thread, only updates labels. No blocking calls here.
+        gpu_util / vram_percent / vram_total_gb == -1.0 means N/A
+        """
         try:
             # ====== CPU & SRAM ======
-            cpu_percent = psutil.cpu_percent(interval=0.1)
-            ram = psutil.virtual_memory()
-            sram_percent = ram.percent
-            sram_total_gb = ram.total / (1024 ** 3)
-
-            # === Dynamic colors format ===
-            cpu_str = f"{cpu_percent:05.1f}%" if cpu_percent < 100 else "100%"
-            sram_str = f"{sram_percent:05.1f}%" if sram_percent < 100 else "100%"
-            
-            # === Color Determination ===
-            cpu_color = self.get_usage_color(cpu_percent)
+            cpu_str   = f"{cpu_percent:05.1f}%" if cpu_percent < 100 else "100%"
+            sram_str  = f"{sram_percent:05.1f}%" if sram_percent < 100 else "100%"
+            cpu_color  = self.get_usage_color(cpu_percent)
             sram_color = self.get_usage_color(sram_percent)
 
-            # === HTML formatting for different colors in same label ===
             self.cpu_sram_label.setText(
                 f'CPU: <span style="color:{cpu_color};">{cpu_str}</span>   '
                 f'SRAM: <span style="color:{sram_color};">{sram_str}</span>'
             )
 
-            # === GPU & VRAM ===
-            gpu_util_str = "N/A"
-            vram_percent_str = "N/A"
-            vram_total_gb = "N/A"
-            gpu_color = "#FFFFFF"
-            vram_color = "#FFFFFF"
-        
-            try:
-                output = subprocess.check_output([
-                    'nvidia-smi', 
-                    '--query-gpu=utilization.gpu,memory.used,memory.total', 
-                    '--format=csv,noheader,nounits'
-                ]).decode().strip()
-            
-                parts = output.split(',')
-                gpu_util = float(parts[0].strip())
-                vram_used_mb = float(parts[1].strip())
-                vram_total_mb = float(parts[2].strip())
-                vram_percent = (vram_used_mb / vram_total_mb) * 100 if vram_total_mb > 0 else 0
-                vram_total_gb = vram_total_mb / 1024
-
-                gpu_util_str = f"{gpu_util:05.1f}%" if gpu_util < 100 else "100%"
-                vram_percent_str = f"{vram_percent:05.1f}%" if vram_percent < 100 else "100%"
-            
-                # === Color determination for GPU and VRAM ===
-                gpu_color = self.get_usage_color(gpu_util)
-                vram_color = self.get_usage_color(vram_percent)
-            
-            except:
-                pass  # === If it's not NVIDIA or an error, stay N/A ===
+            # ====== GPU & VRAM ======
+            if gpu_util >= 0:
+                gpu_util_str      = f"{gpu_util:05.1f}%"  if gpu_util     < 100 else "100%"
+                vram_percent_str  = f"{vram_percent:05.1f}%" if vram_percent < 100 else "100%"
+                gpu_color         = self.get_usage_color(gpu_util)
+                vram_color        = self.get_usage_color(vram_percent)
+            else:
+                gpu_util_str     = "N/A"
+                vram_percent_str = "N/A"
+                gpu_color        = "#FFFFFF"
+                vram_color       = "#FFFFFF"
 
             self.gpu_vram_label.setText(
                 f'GPU: <span style="color:{gpu_color};">{gpu_util_str}</span>   '
                 f'VRAM: <span style="color:{vram_color};">{vram_percent_str}</span>'
             )
-        
-            # === Total Memory (no colors, only info) ===
-            if isinstance(vram_total_gb, float):
-                self.total_label.setText(
-                    f"SRAM: {sram_total_gb:.1f} GB   VRAM: {vram_total_gb:.1f} GB"
-                )
-            else:
-                self.total_label.setText(
-                    f"SRAM: {sram_total_gb:.1f} GB   VRAM: {vram_total_gb}"
-                )
+
+            # ====== Total Memory ======
+            vram_gb_str = f"{vram_total_gb:.1f} GB" if vram_total_gb >= 0 else "N/A"
+            self.total_label.setText(
+                f"SRAM: {sram_total_gb:.1f} GB   VRAM: {vram_gb_str}"
+            )
 
         except Exception as e:
             logging.error(f"Error updating resources: {str(e)}")
-            self.cpu_sram_label.setText("CPU: N/A   SRAM: N/A")
-            self.gpu_vram_label.setText("GPU: N/A   VRAM: N/A")
-            self.total_label.setText("SRAM: N/A   VRAM: N/A")
 
     def get_usage_color(self, percent): # === Returns the color based on percentage ===
         if percent < 70:
@@ -1403,7 +1458,7 @@ class AIAssistantGUI(QMainWindow):
         self.tts_active = False
         logging.info("TTS stop signal sent.")
         QApplication.processEvents()
-        self.vu_meter_output.set_level(0)
+        self.vu_output_signal.emit(0)
 
     def toggle_recording(self):
         try:
@@ -1460,8 +1515,8 @@ class AIAssistantGUI(QMainWindow):
                             padding: 0px;
                         }
                     """)
-                    self.vu_meter_input.set_level(0)
-                    self.vu_meter_output.set_level(0)
+                    self.vu_input_signal.emit(0)
+                    self.vu_output_signal.emit(0)
 
             check_thread()
 
@@ -1492,7 +1547,7 @@ class AIAssistantGUI(QMainWindow):
                 # === PAUSE LOGIC WITH FLUSHING ===
                 if self.recording_paused and not self.real_talk_enabled:
                     time.sleep(0.05)
-                    self.vu_meter_input.set_level(0)
+                    self.vu_input_signal.emit(0)
                     
                     # === ⚠️ CRITICAL: While it's on pause, it reads and discards the data ⚠️ ===
                     # === This keeps the buffer empty and prevents "echo" (mic bleed) ===
@@ -1514,7 +1569,7 @@ class AIAssistantGUI(QMainWindow):
                     
                     rms = np.sqrt(np.mean(audio_float ** 2))
                     level = min(int(rms * 100), 14)
-                    self.vu_meter_input.set_level(level)
+                    self.vu_input_signal.emit(level)
 
                     vad_buffer = audio_float
                     if len(vad_buffer) >= VAD_WINDOW_SIZE:
@@ -1560,7 +1615,7 @@ class AIAssistantGUI(QMainWindow):
                                                 self.audio_stream.read(self.audio_stream.get_read_available(), exception_on_overflow=False)
                                             except: pass
                                         logging.info("Microphone PAUSED.")
-                                        self.vu_meter_input.set_level(0)
+                                        self.vu_input_signal.emit(0)
 
                                     segment_frames = frames.copy()
                                     processing_thread = threading.Thread(target=self.process_audio_segment, args=(segment_frames,))
@@ -1747,6 +1802,38 @@ class AIAssistantGUI(QMainWindow):
         os.makedirs(HISTORY_DIR, exist_ok=True)
         os.makedirs(self.current_rag_dir, exist_ok=True)
         logging.info(f"Profile paths switched → '{profile_name}'")
+
+        self.update_profile_display(profile_name)
+
+    def update_profile_display(self, profile_name):
+        """
+        Updates profile image (64x64) and name label in System Settings frame.
+        Looks for Graphics/<profile_name>.png — shows placeholder if not found.
+        """
+        try:
+            # === Profile name label ===
+            self.profile_name_label.setText(profile_name)
+
+            # === Profile image ===
+            img_path = os.path.join(GRAPHICS_DIR, f"{profile_name}.png")
+            pixmap = QPixmap(img_path)
+            if not pixmap.isNull():
+                self.profile_image_label.setPixmap(
+                    pixmap.scaled(64, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                )
+            else:
+                # === No profile image found — load default placeholder ===
+                default_path = os.path.join(GRAPHICS_DIR, "Profile.png")
+                default_pixmap = QPixmap(default_path)
+                if not default_pixmap.isNull():
+                    self.profile_image_label.setPixmap(
+                        default_pixmap.scaled(64, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    )
+                else:
+                    self.profile_image_label.clear()
+                    logging.warning("⚠️ Profile.png not found in Graphics folder")
+        except Exception as e:
+            logging.error(f"update_profile_display error: {e}")
 
     def ensure_default_profile(self):
         """
@@ -2213,7 +2300,7 @@ class AIAssistantGUI(QMainWindow):
                                 audio_float = small_chunk.astype(np.float32) / 32768.0
                                 rms = np.sqrt(np.mean(audio_float ** 2))
                                 level = min(int(rms * 100), 14)
-                                self.vu_meter_output.set_level(level)
+                                self.vu_output_signal.emit(level)
                             except:
                                 pass
 
@@ -2224,7 +2311,7 @@ class AIAssistantGUI(QMainWindow):
                     self.coqui_model = None 
                 finally:
                     self.tts_active = False
-                    self.vu_meter_output.set_level(0)
+                    self.vu_output_signal.emit(0)
                     if completion_event is not None:
                         completion_event.set()
 
@@ -2304,7 +2391,7 @@ class AIAssistantGUI(QMainWindow):
     def load_lm_models(self):
         logging.info("Loading LM Studio models")
         try:
-            base_url = self.lm_server_entry.text().rstrip('/') # === Taking URL from GUI is safer ===
+            base_url = self.lm_server_entry.text().rstrip('/') # === Luam URL-ul din GUI, e mai safe ===
             if not base_url:
                 base_url = "http://127.0.0.1:1234"
                 
@@ -2528,7 +2615,7 @@ class AIAssistantGUI(QMainWindow):
             if memory_context:
                 system_prompt += f"\n\n{memory_context}"
 
-            # ====== FULL PROMPT LOGGING (what LLM actually receives) ======
+            # ====== FULL PROMPT LOGGING — what LLM actually receives ======
             logging.debug("=" * 60)
             logging.debug(f"📤 USER PROMPT:\n{prompt}")
             logging.debug("-" * 60)
@@ -3829,6 +3916,10 @@ NOW, based on the tool results above, what is your response?
         self.stop_tts_stream()    
         self.rag_event.set()
         self.rag_queue.put(None)
+        # === Stop System Monitor worker thread ===
+        self.monitor_worker.stop()
+        self.monitor_thread.quit()
+        self.monitor_thread.wait(2000)
         # === Stop the headless MCP Server if it runs ===
         if self.use_mcp_server:
             self.stop_mcp_server_headless()
