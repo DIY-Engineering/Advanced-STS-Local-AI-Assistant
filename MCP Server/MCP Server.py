@@ -521,7 +521,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 "prompts": {"listChanged": False},
                 "tools":   {"listChanged": False}
             },
-            "serverInfo": {"name": "MCP Server (Plugin-Based)", "version": "1.4"}
+            "serverInfo": {"name": "MCP Server (Plugin-Based)", "version": "0.1.1"}
         }
 
     def _handle_prompts_list(self):
@@ -533,8 +533,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if params.get("name") != "assistant_system_prompt":
             raise ValueError(f"Unknown prompt: {params.get('name')}")
 
-        parts = ["You are an AI Assistant with MCP tool access.",
-                 "\nAVAILABLE TOOLS:\n"]
+        parts = ["AVAILABLE TOOLS:\n"]
 
         if _plugin_manager:
             for plugin in _plugin_manager.plugins.values():
