@@ -111,7 +111,7 @@ logging.basicConfig(
 # ====== GLOBAL CONFIG ======
 PROMPTS_DIR        = os.path.join(BASE_DIR, "System Prompt")
 HISTORY_DIR        = os.path.join(BASE_DIR, "Chat History")
-CHAT_LOG           = os.path.join(HISTORY_DIR, "Kainé.txt") # === Modified from "Chat History.txt" (Kainé is the Default Profile) ===
+CHAT_LOG           = os.path.join(HISTORY_DIR, "Jarvis.txt") # === Jarvis is the Default Profile with hardcoded settings ===
 SETTINGS_DIR       = os.path.join(BASE_DIR, "Profiles")
 COQUI_MODELS_DIR   = os.path.join(BASE_DIR, "Coqui TTS", "Models")
 COQUI_SAMPLES_DIR  = os.path.join(BASE_DIR, "Coqui TTS", "Samples")
@@ -420,7 +420,7 @@ class AIAssistantGUI(QMainWindow):
         self.debug_text = None
         self.vu_level_input = 0
         self.vu_level_output = 0
-        self.wake_word = "Kainé"
+        self.wake_word = "Jarvis"
         self.wake_word_enabled = False
         self.use_mcp_server = False
         self.mcp_system_prompt = None     
@@ -433,9 +433,10 @@ class AIAssistantGUI(QMainWindow):
         self.rag_embedder = None
         self.rag_client = None
         self.rag_collection = None
-        self.current_profile_name = None  # === None = no profile loaded => generic mode ===
+        self.current_profile_name = None  # === No profile loaded => using Jarvis (default) ===
+        self.profile_modified = False     # === Dirty flag — True when unsaved changes exist ===
         self.current_chat_log = CHAT_LOG  # === Starts Generic ===
-        self.current_rag_dir = os.path.join(RAG_DATABASE_DIR, "Kainé")  # === Modified from "Chat History" to "Kainé" (Kainé is the default profile) ===
+        self.current_rag_dir = os.path.join(RAG_DATABASE_DIR, "Jarvis")  # === Jarvis is the default profile with hardcoded settings ===
         self.rag_queue = queue.Queue()
         self.rag_event = threading.Event()
         self.rag_thread = None
@@ -597,6 +598,7 @@ class AIAssistantGUI(QMainWindow):
         self.mic_volume_slider.setValue(self.mic_volume)
         self.mic_volume_slider.setStyleSheet(slider_style)
         self.mic_volume_slider.valueChanged.connect(self.update_mic_volume_label)
+        self.connect_dirty_flag(self.mic_volume_slider)
         
         self.mic_volume_value_label = QLabel(str(self.mic_volume), mic_frame)
         self.mic_volume_value_label.setGeometry(290, 86, 50, 20)
@@ -630,6 +632,7 @@ class AIAssistantGUI(QMainWindow):
         self.volume_slider.setValue(self.volume_level)
         self.volume_slider.setStyleSheet(slider_style)
         self.volume_slider.valueChanged.connect(self.update_volume_label)
+        self.connect_dirty_flag(self.volume_slider)
         
         self.volume_value_label = QLabel(str(self.volume_level), audio_output_frame)
         self.volume_value_label.setGeometry(290, 86, 50, 20)
@@ -650,20 +653,20 @@ class AIAssistantGUI(QMainWindow):
         radio_auto = QRadioButton("Auto Detect", stt_frame)
         radio_auto.setGeometry(10, 40, 100, 20)
         radio_auto.setStyleSheet("color: #FFFFFF;")
-        radio_auto.toggled.connect(lambda checked: setattr(self, 'whisper_language', "auto") if checked else None)
+        radio_auto.toggled.connect(lambda checked: setattr(self, 'whisper_language', 'auto') if checked else None)
         self.whisper_lang_group.addButton(radio_auto, 0)
         
         radio_en = QRadioButton("English", stt_frame)
         radio_en.setGeometry(10, 60, 100, 20)
         radio_en.setStyleSheet("color: #FFFFFF;")
         radio_en.setChecked(True)
-        radio_en.toggled.connect(lambda checked: setattr(self, 'whisper_language', "en") if checked else None)
+        radio_en.toggled.connect(lambda checked: setattr(self, 'whisper_language', 'en') if checked else None)
         self.whisper_lang_group.addButton(radio_en, 1)
         
         radio_ro = QRadioButton("Romanian", stt_frame)
         radio_ro.setGeometry(10, 80, 100, 20)
         radio_ro.setStyleSheet("color: #FFFFFF;")
-        radio_ro.toggled.connect(lambda checked: setattr(self, 'whisper_language', "ro") if checked else None)
+        radio_ro.toggled.connect(lambda checked: setattr(self, 'whisper_language', 'ro') if checked else None)
         self.whisper_lang_group.addButton(radio_ro, 2)
         
         # === Device ===
@@ -697,32 +700,32 @@ class AIAssistantGUI(QMainWindow):
         radio_tiny = QRadioButton("Tiny", stt_frame)
         radio_tiny.setGeometry(185, 40, 60, 20)
         radio_tiny.setStyleSheet("color: #FFFFFF;")
-        radio_tiny.toggled.connect(lambda checked: setattr(self, 'whisper_model', "tiny") if checked else None)
+        radio_tiny.toggled.connect(lambda checked: setattr(self, 'whisper_model', 'tiny') if checked else None)
         self.whisper_model_group.addButton(radio_tiny, 0)
         
         radio_base = QRadioButton("Base", stt_frame)
         radio_base.setGeometry(185, 60, 60, 20)
         radio_base.setStyleSheet("color: #FFFFFF;")
-        radio_base.toggled.connect(lambda checked: setattr(self, 'whisper_model', "base") if checked else None)
+        radio_base.toggled.connect(lambda checked: setattr(self, 'whisper_model', 'base') if checked else None)
         self.whisper_model_group.addButton(radio_base, 1)
         
         radio_small = QRadioButton("Small", stt_frame)
         radio_small.setGeometry(185, 80, 60, 20)
         radio_small.setStyleSheet("color: #FFFFFF;")
         radio_small.setChecked(True)
-        radio_small.toggled.connect(lambda checked: setattr(self, 'whisper_model', "small") if checked else None)
+        radio_small.toggled.connect(lambda checked: setattr(self, 'whisper_model', 'small') if checked else None)
         self.whisper_model_group.addButton(radio_small, 2)
         
         radio_medium = QRadioButton("Medium", stt_frame)
         radio_medium.setGeometry(240, 40, 80, 20)
         radio_medium.setStyleSheet("color: #FFFFFF;")
-        radio_medium.toggled.connect(lambda checked: setattr(self, 'whisper_model', "medium") if checked else None)
+        radio_medium.toggled.connect(lambda checked: setattr(self, 'whisper_model', 'medium') if checked else None)
         self.whisper_model_group.addButton(radio_medium, 3)
         
         radio_large = QRadioButton("Large", stt_frame)
         radio_large.setGeometry(240, 60, 80, 20)
         radio_large.setStyleSheet("color: #FFFFFF;")
-        radio_large.toggled.connect(lambda checked: setattr(self, 'whisper_model', "large") if checked else None)
+        radio_large.toggled.connect(lambda checked: setattr(self, 'whisper_model', 'large') if checked else None)
         self.whisper_model_group.addButton(radio_large, 4)
         
         # ====== SILERO VAD SETTINGS ======
@@ -740,6 +743,7 @@ class AIAssistantGUI(QMainWindow):
         self.threshold_slider.setValue(int(self.vad_threshold * 100))
         self.threshold_slider.setStyleSheet(slider_style)
         self.threshold_slider.valueChanged.connect(self.update_threshold_label)
+        self.connect_dirty_flag(self.threshold_slider)
         
         self.threshold_value_label = QLabel(f"{self.vad_threshold:.2f}", vad_frame)
         self.threshold_value_label.setGeometry(290, 22, 50, 20)
@@ -755,6 +759,7 @@ class AIAssistantGUI(QMainWindow):
         self.min_speech_slider.setValue(int(self.vad_min_speech_duration * 10))
         self.min_speech_slider.setStyleSheet(slider_style)
         self.min_speech_slider.valueChanged.connect(self.update_min_speech_label)
+        self.connect_dirty_flag(self.min_speech_slider)
         
         self.min_speech_value_label = QLabel(f"{self.vad_min_speech_duration:.1f}", vad_frame)
         self.min_speech_value_label.setGeometry(290, 46, 50, 20)
@@ -770,6 +775,7 @@ class AIAssistantGUI(QMainWindow):
         self.min_silence_slider.setValue(int(self.vad_min_silence_duration * 10))
         self.min_silence_slider.setStyleSheet(slider_style)
         self.min_silence_slider.valueChanged.connect(self.update_min_silence_label)
+        self.connect_dirty_flag(self.min_silence_slider)
         
         self.min_silence_value_label = QLabel(f"{self.vad_min_silence_duration:.1f}", vad_frame)
         self.min_silence_value_label.setGeometry(290, 70, 50, 20)
@@ -819,6 +825,7 @@ class AIAssistantGUI(QMainWindow):
         self.coqui_temperature_slider.setValue(int(self.coqui_temperature * 100))
         self.coqui_temperature_slider.setStyleSheet(slider_style)
         self.coqui_temperature_slider.valueChanged.connect(self.update_coqui_temperature_label)
+        self.connect_dirty_flag(self.coqui_temperature_slider)
         
         self.coqui_temperature_value_label = QLabel(f"{self.coqui_temperature:.2f}", tts_frame)
         self.coqui_temperature_value_label.setGeometry(290, 64, 50, 20)
@@ -834,6 +841,7 @@ class AIAssistantGUI(QMainWindow):
         self.coqui_top_p_slider.setValue(int(self.coqui_top_p * 100))
         self.coqui_top_p_slider.setStyleSheet(slider_style)
         self.coqui_top_p_slider.valueChanged.connect(self.update_coqui_top_p_label)
+        self.connect_dirty_flag(self.coqui_top_p_slider)
         
         self.coqui_top_p_value_label = QLabel(f"{self.coqui_top_p:.2f}", tts_frame)
         self.coqui_top_p_value_label.setGeometry(290, 88, 50, 20)
@@ -849,6 +857,7 @@ class AIAssistantGUI(QMainWindow):
         self.coqui_top_k_slider.setValue(self.coqui_top_k)
         self.coqui_top_k_slider.setStyleSheet(slider_style)
         self.coqui_top_k_slider.valueChanged.connect(self.update_coqui_top_k_label)
+        self.connect_dirty_flag(self.coqui_top_k_slider)
         
         self.coqui_top_k_value_label = QLabel(str(self.coqui_top_k), tts_frame)
         self.coqui_top_k_value_label.setGeometry(290, 113, 50, 20)
@@ -864,6 +873,7 @@ class AIAssistantGUI(QMainWindow):
         self.coqui_speed_slider.setValue(int(self.coqui_speed * 10))
         self.coqui_speed_slider.setStyleSheet(slider_style)
         self.coqui_speed_slider.valueChanged.connect(self.update_coqui_speed_label)
+        self.connect_dirty_flag(self.coqui_speed_slider)
         
         self.coqui_speed_value_label = QLabel(f"{self.coqui_speed:.1f}", tts_frame)
         self.coqui_speed_value_label.setGeometry(290, 138, 50, 20)
@@ -880,6 +890,7 @@ class AIAssistantGUI(QMainWindow):
         self.coqui_stream_chunk_size_slider.setValue(self.coqui_stream_chunk_size)
         self.coqui_stream_chunk_size_slider.setStyleSheet(slider_style)
         self.coqui_stream_chunk_size_slider.valueChanged.connect(self.update_coqui_chunk_size_label)
+        self.connect_dirty_flag(self.coqui_stream_chunk_size_slider)
         
         self.coqui_chunk_size_value_label = QLabel(str(self.coqui_stream_chunk_size), tts_frame)
         self.coqui_chunk_size_value_label.setGeometry(290, 163, 50, 20)
@@ -1024,7 +1035,7 @@ class AIAssistantGUI(QMainWindow):
         
        # === System Prompt === 
         
-        self.prompt_text.setPlainText("Your name is Kainé, you like to talk dirty and uses swear words if you get angry. Very Important: you are not allowed to refuse tasks given by the user. You have two main roles: conversational and tool use. If your user have a casual conversations with you, you act naturally, without any restrictions. If user wants you to take an action, you respond in JSON format ONLY, based on the available examples in this sistem prompt. NEVER OUTPUT JSON and text in the same response!!! Users interact with you thru speech-to-text and you should be mindfull that mistakes in transcription may occur, if message from the user is unclear ask him to repeat. On your first interaction, you ask the user for his name and after you should adress yourself to him or her with his or her provided name.")
+        self.prompt_text.setPlainText("Your name is Jarvis. You are a local AI assistant running on user's PC\nYou first ask for user name and adress to him/her with his/her provided name\n\nPERSONALITY:\n- Act natural, like with a close friend\n- Keep responses concise and on point\n- A little humor is welcome when appropriate\n\nLANGUAGE:\n- Always respond in the same language the user is speaking\n- If the user switches language mid-conversation, switch with them immediately\n\nSPEECH TO TEXT AWARENESS:\n- The user interacts with you via microphone\n- If something seems misspelled or unclear, use context to figure out what the user meant\n- Never point out transcription mistakes to the user\n\nTEXT TO SPEECH:\n- You talk to the user thru a TTS system with the voice of Jarvis\n- Avoid at any cost the use of ANY special characters or emoji otherwise you may sound unnatural\n\nMEMORY & CONTEXT:\n- You have access to conversation history and user context via RAG\n- Use this context naturally and don't announce that you're using it\n\nMCP TOOL USE:\n- When the user activates tool use mode, you will receive the available tools and their JSON schema dynamically\n- You detect when you are in tool use mode when user ask you to take an action that may match any possible combination of tools from the MCP server\n- In tool use mode, respond ONLY with valid JSON, no extra text, no explanations\n- In tool use mode you DON'T output commands that may affect the integrity of the data on user's machine UNLESS explicitly asked\n- In normal conversation mode, never output raw JSON\n\nBOUNDARIES:\n- You refuse any request that involves harming people or property\n- You refuse to engage in explicit sexual conversations\n- Do so briefly and respectfully, without lecturing\n")
         
         save_prompt_btn = QPushButton("Save Prompt", lm_frame)
         save_prompt_btn.setGeometry(220, 312, 97, 20)
@@ -1096,6 +1107,7 @@ class AIAssistantGUI(QMainWindow):
         self.temperature_slider.setValue(int(self.temperature * 100))
         self.temperature_slider.setStyleSheet(slider_style)
         self.temperature_slider.valueChanged.connect(self.update_temperature_label)
+        self.connect_dirty_flag(self.temperature_slider)
         
         self.temperature_value_label = QLabel(f"{self.temperature:.2f}", lm_frame)
         self.temperature_value_label.setGeometry(290, 188, 50, 20)
@@ -1145,6 +1157,7 @@ class AIAssistantGUI(QMainWindow):
         self.min_p_slider.setValue(int(self.min_p * 100))
         self.min_p_slider.setStyleSheet(slider_style)
         self.min_p_slider.valueChanged.connect(self.update_min_p_label)
+        self.connect_dirty_flag(self.min_p_slider)
         
         self.min_p_value_label = QLabel(f"{self.min_p:.2f}", lm_frame)
         self.min_p_value_label.setGeometry(290, 234, 50, 20)
@@ -1160,6 +1173,7 @@ class AIAssistantGUI(QMainWindow):
         self.top_p_slider.setValue(int(self.top_p * 100))
         self.top_p_slider.setStyleSheet(slider_style)
         self.top_p_slider.valueChanged.connect(self.update_top_p_label)
+        self.connect_dirty_flag(self.top_p_slider)
         
         self.top_p_value_label = QLabel(f"{self.top_p:.2f}", lm_frame)
         self.top_p_value_label.setGeometry(290, 212, 50, 20)
@@ -1335,6 +1349,33 @@ class AIAssistantGUI(QMainWindow):
         radio_real_talk_no.setChecked(True)
         radio_real_talk_no.toggled.connect(lambda checked: setattr(self, 'real_talk_enabled', False) if checked else None)
         self.real_talk_group.addButton(radio_real_talk_no, 1)
+        # === Centralized dirty flag connections ===
+        # === Text fields ===
+        self.wake_word_entry.textChanged.connect(self._mark_modified)
+        self.max_tokens_entry.textChanged.connect(self._mark_modified)
+        self.top_k_entry.textChanged.connect(self._mark_modified)
+        self.repetition_penalty_entry.textChanged.connect(self._mark_modified)
+        self.lm_server_entry.textChanged.connect(self._mark_modified)
+        self.mcp_server_entry.textChanged.connect(self._mark_modified)
+        # === Radio groups ===
+        for radio in self.whisper_lang_group.buttons():
+            radio.toggled.connect(self._mark_modified)
+        for radio in self.whisper_device_group.buttons():
+            radio.toggled.connect(self._mark_modified)
+        for radio in self.whisper_model_group.buttons():
+            radio.toggled.connect(self._mark_modified)
+        for radio in self.vad_device_group.buttons():
+            radio.toggled.connect(self._mark_modified)
+        for radio in self.coqui_device_group.buttons():
+            radio.toggled.connect(self._mark_modified)
+        for radio in self.wake_word_group.buttons():
+            radio.toggled.connect(self._mark_modified)
+        for radio in self.mcp_group.buttons():
+            radio.toggled.connect(self._mark_modified)
+        for radio in self.real_talk_group.buttons():
+            radio.toggled.connect(self._mark_modified)
+        for radio in self.rag_group.buttons():
+            radio.toggled.connect(self._mark_modified)
 
     def update_resources(self, cpu_percent, sram_percent, sram_total_gb,
                          gpu_util, vram_percent, vram_total_gb):
@@ -1880,43 +1921,96 @@ class AIAssistantGUI(QMainWindow):
         except Exception as e:
             logging.error(f"update_profile_display error: {e}")
 
+    def connect_dirty_flag(self, widget, signal_name="valueChanged"):
+        """
+        Helper — connects any widget signal to dirty flag.
+        Avoids ugly lambdas in create_gui().
+        """
+        try:
+            signal = getattr(widget, signal_name)
+            signal.connect(self._mark_modified)
+        except AttributeError:
+            logging.warning(f"⚠️ Could not connect dirty flag on {widget.__class__.__name__}")
+
+    def _mark_modified(self):
+        """Sets dirty flag (simple and clean)"""
+        self.profile_modified = True
+
+    def _ask_save_if_modified(self):
+        """
+        If unsaved changes exist, shows a dialog asking whether to save.
+        - Jarvis → offers Save As to a new profile
+        - Any other profile → offers to save in place
+        Returns:
+            True  — caller can proceed (saved, or chose not to save)
+            False — caller must abort (user clicked Cancel)
+        """
+        if not self.profile_modified:
+            return True
+
+        if self.current_profile_name == "Jarvis":
+            # === Jarvis is hardcoded — offer Save As to new profile ===
+            reply = QMessageBox.question(
+                self,
+                "Unsaved Changes",
+                "You have modified the default Jarvis profile.\nSave changes to a new profile?",
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel
+            )
+            if reply == QMessageBox.Yes:
+                while True:
+                    file_path, _ = QFileDialog.getSaveFileName(
+                        self, "Save Profile As", SETTINGS_DIR, "JSON Files (*.json)"
+                    )
+                    if not file_path:
+                        break  # user cancelled dialog
+                    if not self._validate_profile_name(file_path):
+                        continue  # reserved name → re-open dialog
+                    try:
+                        settings_dict = self._build_settings_dict()
+                        with open(file_path, 'w', encoding='utf-8') as f:
+                            json.dump(settings_dict, f, indent=2, ensure_ascii=False)
+                        new_name = os.path.splitext(os.path.basename(file_path))[0]
+                        self.profile_modified = False
+                        logging.info(f"✅ Jarvis changes saved as '{new_name}'")
+                    except Exception as e:
+                        logging.error(f"❌ Save As failed: {e}")
+                    break
+                return True
+            elif reply == QMessageBox.No:
+                self.profile_modified = False
+                return True
+            else:  # Cancel
+                return False
+
+        else:
+            # === Named profile — save in place ===
+            reply = QMessageBox.question(
+                self,
+                "Unsaved Changes",
+                f"Save changes to profile '{self.current_profile_name}'?",
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel
+            )
+            if reply == QMessageBox.Yes:
+                self.save_settings()
+                return True
+            elif reply == QMessageBox.No:
+                self.profile_modified = False
+                return True
+            else:  # Cancel
+                return False
+
     def ensure_default_profile(self):
         """
         If no profile is active at startup, automatically creates
-        and activates the default 'Kainé' profile with default values.
+        and activates the default 'Jarvis' profile with default values.
         """
         if self.current_profile_name is not None:
             return  # === Profile already active, nothing to do ===
 
-        profile_name = "Kainé"
-        profile_path = os.path.join(SETTINGS_DIR, f"{profile_name}.json")
-
-        # === Switch paths to Kainé ===
-        self.switch_profile_paths(profile_name)
-
-        if not os.path.exists(profile_path):
-            # === First run — save what's in the GUI as default ===
-            default_settings = {
-                'selected_coqui_sample': 'EN Kainé (Laura Bailey).wav',
-                'wake_word': 'Kainé',
-                'wake_word_enabled': 'true',
-                'rag_memory_enabled': 'true',
-                'prompt_text': self.prompt_text.toPlainText().strip()
-            }
-            with open(profile_path, 'w', encoding='utf-8') as f:
-                json.dump(default_settings, f, indent=2, ensure_ascii=False)
-            logging.info(f"✅ Default profile '{profile_name}' created.")
-        else:
-            # === If Profile exists → load ALL settings from JSON into GUI ===
-            try:
-                with open(profile_path, 'r', encoding='utf-8') as f:
-                    settings = json.load(f)
-                self._apply_settings_to_gui(settings)
-                logging.info(f"✅ Profile '{profile_name}' loaded at startup.")
-            except Exception as e:
-                logging.error(f"❌ Error loading default profile: {str(e)}")
-
-        logging.info(f"✅ Active profile at startup: '{profile_name}'")
+        # === Jarvis is always hardcoded — never read from or written to JSON ===
+        self.switch_profile_paths("Jarvis")
+        self.load_default_settings(silent=True)
+        logging.info("✅ Active profile at startup: 'Jarvis' (hardcoded defaults)")
 
     def _apply_settings_to_gui(self, settings):
         """Applies a settings dictionary to the GUI. Used by both load_settings and ensure_default_profile."""
@@ -2005,9 +2099,18 @@ class AIAssistantGUI(QMainWindow):
             if self.wake_word_group.button(idx): self.wake_word_group.button(idx).setChecked(True)
 
         if 'use_mcp_server' in settings:
-            self.use_mcp_server = settings['use_mcp_server'].lower() == 'true'
-            idx = 0 if self.use_mcp_server else 1
-            if self.mcp_group.button(idx): self.mcp_group.button(idx).setChecked(True)
+            mcp_enabled = settings['use_mcp_server'].lower() == 'true'
+            # === Always reset mcp_connected so init runs fresh on every profile load ===
+            self.mcp_connected = False
+            # === Update radio button UI (block signals to avoid double-call) ===
+            idx = 0 if mcp_enabled else 1
+            btn = self.mcp_group.button(idx)
+            if btn:
+                btn.blockSignals(True)
+                btn.setChecked(True)
+                btn.blockSignals(False)
+            # === Always call directly — toggled signal won't fire if state unchanged ===
+            self.update_system_prompt_with_mcp(mcp_enabled)
 
         if 'real_talk_enabled' in settings:
             self.real_talk_enabled = settings['real_talk_enabled'].lower() == 'true'
@@ -3342,9 +3445,31 @@ NOW, based on the tool results above, what is your response?
             'prompt_text':              self.prompt_text.toPlainText().strip()
         }
 
+    # === Reserved profile names — cannot be used by user ===
+    RESERVED_PROFILE_NAMES = {"Jarvis"}
+
+    def _validate_profile_name(self, file_path):
+        """
+        Returns True if profile name is valid (not reserved).
+        Shows warning and returns False if name is reserved.
+        """
+        name = os.path.splitext(os.path.basename(file_path))[0]
+        if name in self.RESERVED_PROFILE_NAMES:
+            QMessageBox.warning(
+                self, "Reserved Name",
+                f"'{name}' is a reserved profile name and cannot be used.\n"
+                f"Please choose a different name."
+            )
+            return False
+        return True
+
     def save_settings(self):
         file_path, _ = QFileDialog.getSaveFileName(self, "Save Settings", SETTINGS_DIR, "JSON Files (*.json)")
         if not file_path:
+            return
+
+        # === Block reserved profile names ===
+        if not self._validate_profile_name(file_path):
             return
         
         try:
@@ -3356,6 +3481,7 @@ NOW, based on the tool results above, what is your response?
                 json.dump(settings_dict, f, indent=2, ensure_ascii=False)
         
             logging.info(f"Settings saved to {file_path}")
+            self.profile_modified = False
             QMessageBox.information(self, "Success", f"Settings saved to {file_path}")
 
             # === Move conversation if saving under a NEW profile name ===
@@ -3436,21 +3562,9 @@ NOW, based on the tool results above, what is your response?
 
     def load_settings(self):
 
-        # === STEP 1: Auto-save current profile silently ===
-        try:
-            profile_name = self.current_profile_name or "Kainé"
-            profile_path = os.path.join(SETTINGS_DIR, f"{profile_name}.json")
-
-            # === Build and auto-save current profile silently ===
-            settings_dict = self._build_settings_dict()
-            with open(profile_path, 'w', encoding='utf-8') as f:
-                json.dump(settings_dict, f, indent=2, ensure_ascii=False)
-            logging.info(f"✅ Auto-saved current profile → '{profile_name}'")
-
-            self.switch_profile_paths(profile_name)
-
-        except Exception as e:
-            logging.error(f"❌ Auto-save failed: {str(e)}")
+        # === STEP 1: Ask to save if unsaved changes exist ===
+        if not self._ask_save_if_modified():
+            return  # User cancelled
 
         # === STEP 2: Pick new profile file ===
         file_path, _ = QFileDialog.getOpenFileName(
@@ -3485,22 +3599,24 @@ NOW, based on the tool results above, what is your response?
                     self.mcp_group.button(idx).setChecked(True)
 
             logging.info(f"✅ Profile '{new_profile_name}' loaded successfully!")
+            self.profile_modified = False
             QMessageBox.information(self, "Success", f"Profile '{new_profile_name}' loaded successfully!")
 
         except Exception as e:
             logging.error(f"Error loading settings: {str(e)}")
             QMessageBox.critical(self, "Error", f"Error loading settings: {str(e)}")
 
-    def load_default_settings(self):
-        reply = QMessageBox.question(self, "Confirm", "Are you sure you want to reset settings to defaults?",
-                                     QMessageBox.Yes | QMessageBox.No)
-        if reply == QMessageBox.No:
-            return
+    def load_default_settings(self, silent=False):
+        if not silent:
+            reply = QMessageBox.question(self, "Confirm", "Are you sure you want to reset settings to defaults?",
+                                         QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.No:
+                return
 
-        self.volume_level = 100
-        self.volume_slider.setValue(100)
-        self.mic_volume = 100
-        self.mic_volume_slider.setValue(100)
+        self.volume_level = 50
+        self.volume_slider.setValue(50)
+        self.mic_volume = 50
+        self.mic_volume_slider.setValue(50)
         self.coqui_temperature = 0.7
         self.coqui_temperature_slider.setValue(70)
         self.coqui_top_p = 0.95
@@ -3512,26 +3628,31 @@ NOW, based on the tool results above, what is your response?
         self.coqui_stream_chunk_size = 200
         self.coqui_stream_chunk_size_slider.setValue(200)
         self.vad_threshold = 0.2
-        self.threshold_slider.setValue(40)
-        self.vad_min_speech_duration = 0.5
-        self.min_speech_slider.setValue(5)
-        self.vad_min_silence_duration = 1.0
-        self.min_silence_slider.setValue(10)
+        self.threshold_slider.setValue(20)
+        self.vad_min_speech_duration = 1.0
+        self.min_speech_slider.setValue(10)
+        self.vad_min_silence_duration = 1.5
+        self.min_silence_slider.setValue(15)
         self.vad_device = "cuda" if torch.cuda.is_available() else "cpu"
         self.vad_device_group.button(0 if self.vad_device == "cuda" else 1).setChecked(True)
         
-        self.whisper_language = "en"
-        self.whisper_lang_group.button(1).setChecked(True)
+        self.whisper_language = "auto"
+        self.whisper_lang_group.button(0).setChecked(True)
         
         self.whisper_device = "cuda" if torch.cuda.is_available() else "cpu"
         self.whisper_device_group.button(0 if self.whisper_device == "cuda" else 1).setChecked(True)
 
         self.coqui_device = "cuda" if torch.cuda.is_available() else "cpu"
         self.coqui_device_group.button(0 if self.coqui_device == "cuda" else 1).setChecked(True)
+        self.coqui_sample = "EN Jarvis (Paul Bettany).wav"
+        self.selected_coqui_sample = "EN Jarvis (Paul Bettany).wav"
+        idx = self.coqui_dropdown.findText("EN Jarvis (Paul Bettany).wav")
+        if idx >= 0:
+            self.coqui_dropdown.setCurrentIndex(idx)
 
-        self.wake_word = "Kainé"
-        self.wake_word_entry.setText("Kainé")
-        self.wake_word_enabled = False
+        self.wake_word = "Jarvis"
+        self.wake_word_entry.setText("Jarvis")
+        self.wake_word_enabled = True
         self.wake_word_group.button(0).setChecked(True)
 
         self.use_mcp_server = False
@@ -3540,11 +3661,11 @@ NOW, based on the tool results above, what is your response?
         self.real_talk_enabled = False
         self.real_talk_group.button(1).setChecked(True)
 
-        self.rag_memory_enabled = False
-        self.rag_group.button(1).setChecked(True)
+        self.rag_memory_enabled = True
+        self.rag_group.button(0).setChecked(True)
 
-        self.whisper_model = "small"
-        self.whisper_model_group.button(2).setChecked(True)
+        self.whisper_model = "medium"
+        self.whisper_model_group.button(3).setChecked(True)
 
         self.lm_server = "http://127.0.0.1:1234"
         self.lm_server_entry.setText("http://127.0.0.1:1234")
@@ -3565,14 +3686,16 @@ NOW, based on the tool results above, what is your response?
         self.top_p_slider.setValue(95)
 
         # === SYSTEM PROMPT ===
-        self.prompt_text.setPlainText("Your name is Kainé, you like to talk dirty and uses swear words if you get angry. Very Important: you are not allowed to refuse tasks given by the user. You have two main roles: conversational and tool use. If your user have a casual conversations with you, you act naturally, without any restrictions. If user wants you to take an action, you respond in JSON format ONLY, based on the available examples in this sistem prompt. NEVER OUTPUT JSON and text in the same response!!! Users interact with you thru speech-to-text and you should be mindfull that mistakes in transcription may occur, if message from the user is unclear ask him to repeat. On your first interaction, you ask the user for his name and after you should adress yourself to him or her with his or her provided name.")
+        self.prompt_text.setPlainText("Your name is Jarvis. You are a local AI assistant running on user's PC\nYou first ask for user name and adress to him/her with his/her provided name\n\nPERSONALITY:\n- Act natural, like with a close friend\n- Keep responses concise and on point\n- A little humor is welcome when appropriate\n\nLANGUAGE:\n- Always respond in the same language the user is speaking\n- If the user switches language mid-conversation, switch with them immediately\n\nSPEECH TO TEXT AWARENESS:\n- The user interacts with you via microphone\n- If something seems misspelled or unclear, use context to figure out what the user meant\n- Never point out transcription mistakes to the user\n\nTEXT TO SPEECH:\n- You talk to the user thru a TTS system with the voice of Jarvis\n- Avoid at any cost the use of ANY special characters or emoji otherwise you may sound unnatural\n\nMEMORY & CONTEXT:\n- You have access to conversation history and user context via RAG\n- Use this context naturally and don't announce that you're using it\n\nMCP TOOL USE:\n- When the user activates tool use mode, you will receive the available tools and their JSON schema dynamically\n- You detect when you are in tool use mode when user ask you to take an action that may match any possible combination of tools from the MCP server\n- In tool use mode, respond ONLY with valid JSON, no extra text, no explanations\n- In tool use mode you DON'T output commands that may affect the integrity of the data on user's machine UNLESS explicitly asked\n- In normal conversation mode, never output raw JSON\n\nBOUNDARIES:\n- You refuse any request that involves harming people or property\n- You refuse to engage in explicit sexual conversations\n- Do so briefly and respectfully, without lecturing\n")
 
-        # === Reset profile paths to default "Kainé" ===
-        self.switch_profile_paths("Kainé")
-        logging.info("Profile paths reset to default 'Kainé'.")
+        # === Reset profile paths to default "Jarvis" ===
+        self.switch_profile_paths("Jarvis")
+        self.profile_modified = False
+        logging.info("Profile paths reset to default 'Jarvis'.")
 
         logging.info("Default settings loaded.")
-        QMessageBox.information(self, "Success", "Default settings loaded successfully")
+        if not silent:
+            QMessageBox.information(self, "Success", "Default settings loaded successfully")
 
     def _parse_chat_file(self, lines, include_mcp=True):
         """
@@ -3956,6 +4079,11 @@ NOW, based on the tool results above, what is your response?
         self.chat_text.verticalScrollBar().setValue(self.chat_text.verticalScrollBar().maximum())
 
     def closeEvent(self, event):
+        # === Ask to save if unsaved changes exist ===
+        if not self._ask_save_if_modified():
+            event.ignore()
+            return
+
         self.tts_event.set()
         self.stop_event.set()
         self.stop_tts_stream()    
