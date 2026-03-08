@@ -275,6 +275,59 @@ class SystemMonitorWorker(QObject):
         self._running = False
 
 
+class ProfileFrame(QWidget):
+    """
+    Custom widget — displays profile image inside a rounded frame.
+    Frame: 64x64px, 2px white border, 10px corner radius.
+    Image is drawn centered inside the frame with alpha transparency preserved.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(64, 64)
+        self._pixmap = None
+
+    def set_pixmap(self, pixmap):
+        """Set the image to display — pass None to clear"""
+        self._pixmap = pixmap
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        # === Draw rounded frame ===
+        from PyQt5.QtGui import QPainterPath
+        border    = 2
+        radius    = 10
+        rect      = self.rect().adjusted(border, border, -border, -border)
+
+        # === Frame border ===
+        pen = QPen(QColor("#FFFFFF"), border)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(rect, radius, radius)
+
+        # === Draw image clipped to rounded rect ===
+        if self._pixmap and not self._pixmap.isNull():
+            path = QPainterPath()
+            path.addRoundedRect(
+                rect.x() + 1, rect.y() + 1,
+                rect.width() - 2, rect.height() - 2,
+                radius - 1, radius - 1
+            )
+            painter.setClipPath(path)
+            img_rect = rect.adjusted(1, 1, -1, -1)
+            scaled = self._pixmap.scaled(
+                img_rect.width(), img_rect.height(),
+                Qt.KeepAspectRatioByExpanding,
+                Qt.SmoothTransformation
+            )
+            # === Center image in frame ===
+            x = img_rect.x() + (img_rect.width()  - scaled.width())  // 2
+            y = img_rect.y() + (img_rect.height() - scaled.height()) // 2
+            painter.drawPixmap(x, y, scaled)
+
+
 class RefreshableComboBox(QComboBox):
     """QComboBox calls refresh function when open"""
     def __init__(self, parent=None):
@@ -1198,15 +1251,13 @@ class AIAssistantGUI(QMainWindow):
         """)
         self.start_stop_button.clicked.connect(self.toggle_recording)
         
-        # === Profile Image (64x64) ===
-        self.profile_image_label = QLabel(system_frame)
-        self.profile_image_label.setGeometry(230, 35, 64, 64)
-        self.profile_image_label.setStyleSheet("border: none; background-color: transparent;")
-        self.profile_image_label.setAlignment(Qt.AlignCenter)
+        # === Profile Image Frame (64x64) ===
+        self.profile_image_label = ProfileFrame(system_frame)
+        self.profile_image_label.setGeometry(234, 30, 64, 64)
 
         # === Profile Name Label ===
         self.profile_name_label = QLabel("", system_frame)
-        self.profile_name_label.setGeometry(214, 100, 100, 20)
+        self.profile_name_label.setGeometry(192, 92, 148, 20)
         self.profile_name_label.setStyleSheet("color: #FFFF96; border: none; font-weight: bold; font-size: 10pt;")
         self.profile_name_label.setAlignment(Qt.AlignCenter)
 
@@ -1249,37 +1300,37 @@ class AIAssistantGUI(QMainWindow):
         self.mcp_server_entry.textChanged.connect(lambda text: setattr(self, 'mcp_server', text))
         
         use_mcp_label = QLabel("Use MCP Server", system_frame)
-        use_mcp_label.setGeometry(216, 160, 100, 20)
+        use_mcp_label.setGeometry(219, 160, 100, 20)
         use_mcp_label.setStyleSheet("color: #FFFFFF; border: none; font-weight: bold; font-size: 9pt;")
         
         self.mcp_group = QButtonGroup(system_frame)
         
         radio_mcp_yes = QRadioButton("Yes", system_frame)
-        radio_mcp_yes.setGeometry(224, 180, 40, 20)
+        radio_mcp_yes.setGeometry(227, 180, 40, 20)
         radio_mcp_yes.setStyleSheet("color: #FFFFFF;")
         radio_mcp_yes.toggled.connect(lambda checked: self.update_system_prompt_with_mcp(checked))
         self.mcp_group.addButton(radio_mcp_yes, 0)
         
         radio_mcp_no = QRadioButton("No", system_frame)
-        radio_mcp_no.setGeometry(266, 180, 40, 20)
+        radio_mcp_no.setGeometry(269, 180, 40, 20)
         radio_mcp_no.setStyleSheet("color: #FFFFFF;")
         radio_mcp_no.setChecked(True)
         self.mcp_group.addButton(radio_mcp_no, 1)
         
         real_talk_label = QLabel("Real Talk", system_frame)
-        real_talk_label.setGeometry(235, 124, 80, 20)
+        real_talk_label.setGeometry(238, 124, 80, 20)
         real_talk_label.setStyleSheet("color: #FFFFFF; border: none; font-weight: bold; font-size: 9pt;")
         
         self.real_talk_group = QButtonGroup(system_frame)
         
         radio_real_talk_yes = QRadioButton("Yes", system_frame)
-        radio_real_talk_yes.setGeometry(224, 140, 40, 20)
+        radio_real_talk_yes.setGeometry(227, 140, 40, 20)
         radio_real_talk_yes.setStyleSheet("color: #FFFFFF;")
         radio_real_talk_yes.toggled.connect(lambda checked: setattr(self, 'real_talk_enabled', True) if checked else None)
         self.real_talk_group.addButton(radio_real_talk_yes, 0)
         
         radio_real_talk_no = QRadioButton("No", system_frame)
-        radio_real_talk_no.setGeometry(266, 140, 40, 20)
+        radio_real_talk_no.setGeometry(269, 140, 40, 20)
         radio_real_talk_no.setStyleSheet("color: #FFFFFF;")
         radio_real_talk_no.setChecked(True)
         radio_real_talk_no.toggled.connect(lambda checked: setattr(self, 'real_talk_enabled', False) if checked else None)
@@ -1807,30 +1858,24 @@ class AIAssistantGUI(QMainWindow):
 
     def update_profile_display(self, profile_name):
         """
-        Updates profile image (64x64) and name label in System Settings frame.
-        Looks for Graphics/<profile_name>.png — shows placeholder if not found.
+        Updates profile image (120x120 ProfileFrame) and name label.
+        Looks for Graphics/<profile_name>.png — falls back to Graphics/Profile.png.
         """
         try:
-            # === Profile name label ===
             self.profile_name_label.setText(profile_name)
 
-            # === Profile image ===
             img_path = os.path.join(GRAPHICS_DIR, f"{profile_name}.png")
             pixmap = QPixmap(img_path)
             if not pixmap.isNull():
-                self.profile_image_label.setPixmap(
-                    pixmap.scaled(64, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                )
+                self.profile_image_label.set_pixmap(pixmap)
             else:
-                # === No profile image found — load default placeholder ===
+                # === Fallback to default profile image ===
                 default_path = os.path.join(GRAPHICS_DIR, "Profile.png")
                 default_pixmap = QPixmap(default_path)
                 if not default_pixmap.isNull():
-                    self.profile_image_label.setPixmap(
-                        default_pixmap.scaled(64, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                    )
+                    self.profile_image_label.set_pixmap(default_pixmap)
                 else:
-                    self.profile_image_label.clear()
+                    self.profile_image_label.set_pixmap(None)
                     logging.warning("⚠️ Profile.png not found in Graphics folder")
         except Exception as e:
             logging.error(f"update_profile_display error: {e}")
