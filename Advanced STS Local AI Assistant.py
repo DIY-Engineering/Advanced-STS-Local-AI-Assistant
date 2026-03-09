@@ -2157,6 +2157,27 @@ class AIAssistantGUI(QMainWindow):
         if 'prompt_text' in settings and settings['prompt_text'].strip():
             self.prompt_text.setPlainText(settings['prompt_text'])
 
+    def _cleanup_orphaned_rag_folders(self):
+        """
+        Deletes UUID hash folders in current_rag_dir that don't belong
+        to the active collection. Called after every get/create collection.
+        Prevents folder accumulation on Windows where ChromaDB can't auto-delete.
+        """
+        if not self.rag_collection or not os.path.exists(self.current_rag_dir):
+            return
+        try:
+            active_uuid = str(self.rag_collection.id)
+            for item in os.listdir(self.current_rag_dir):
+                item_path = os.path.join(self.current_rag_dir, item)
+                if os.path.isdir(item_path) and item != active_uuid:
+                    try:
+                        shutil.rmtree(item_path)
+                        logging.info(f"🧹 Removed orphaned RAG folder: {item}")
+                    except Exception as e:
+                        logging.warning(f"⚠️ Could not remove orphaned folder '{item}': {e}")
+        except Exception as e:
+            logging.warning(f"⚠️ Orphaned folder cleanup failed: {e}")
+
     def reinit_rag_for_profile(self):
         """
         Closes the current ChromaDB client and reinitializes it
@@ -2175,6 +2196,7 @@ class AIAssistantGUI(QMainWindow):
                 name="chat_memory",
                 metadata={"hnsw:space": "cosine"}
             )
+            self._cleanup_orphaned_rag_folders()
             logging.info(f"✅ RAG reinitialized → '{self.current_rag_dir}' | Docs: {self.rag_collection.count()}")
 
         except Exception as e:
@@ -2200,7 +2222,7 @@ class AIAssistantGUI(QMainWindow):
                 name="chat_memory",
                 metadata={"hnsw:space": "cosine"}
             )
-        
+            self._cleanup_orphaned_rag_folders()
             logging.info(f"RAG Database initialized. Documents: {self.rag_collection.count()}")
         
         except Exception as e:
@@ -2816,18 +2838,35 @@ class AIAssistantGUI(QMainWindow):
                 "method": method,
                 "params": params if params else {}
             }
-            
+
+            # ======================== TEMPORARY DEBUG LOG — REQUEST ===============================================
+            logging.debug(f"[MCP →] id={self.mcp_request_id} method={method}\n"
+                          f"        params={json.dumps(params, indent=2, ensure_ascii=False) if params else '{}'}")
+            # ======================================================================================================
+
             response = requests.post(base_url, json=payload, timeout=10)
             response.raise_for_status()
             data = response.json()
-            
+
             if "error" in data:
+                # ====================== TEMPORARY DEBUG LOG — ERROR ==============================
+                logging.debug(f"[MCP ←] id={self.mcp_request_id} ERROR:\n"
+                              f"        {json.dumps(data['error'], indent=2, ensure_ascii=False)}")
+                # =================================================================================
                 logging.error(f"❌ MCP Error: {data['error']['message']}")
                 return None
-            
+
+            # ====================== TEMPORARY DEBUG LOG — RESPONSE OK ====================================
+            logging.debug(f"[MCP ←] id={self.mcp_request_id} method={method} OK\n"
+                          f"        result={json.dumps(data.get('result'), indent=2, ensure_ascii=False)}")
+            # =============================================================================================
+
             return data.get("result")
             
         except Exception as e:
+            # ====================== TEMPORARY DEBUG LOG — EXCEPTION ==========================
+            logging.debug(f"[MCP ✗] id={self.mcp_request_id} method={method} EXCEPTION: {e}")
+            # =================================================================================
             logging.error(f"🔴 MCP request failed: {str(e)}")
             return None
 
@@ -3870,6 +3909,7 @@ NOW, based on the tool results above, what is your response?
                         name="chat_memory",
                         metadata={"hnsw:space": "cosine"}
                     )
+                    self._cleanup_orphaned_rag_folders()
                     logging.info("✅ Fresh RAG collection created.")
 
                     # === Step C: Run VACUUM directly on chroma.sqlite3 to reclaim disk space ===
