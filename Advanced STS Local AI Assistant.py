@@ -32,7 +32,7 @@ from chromadb.config import Settings
 
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QComboBox, 
                              QPushButton, QTextEdit, QSlider, QRadioButton, QLineEdit,
-                             QGroupBox, QFileDialog, QMessageBox, QButtonGroup)
+                             QGroupBox, QFileDialog, QMessageBox, QButtonGroup, QDialog)
 from PyQt5.QtCore import Qt, pyqtSignal, QObject, QTimer, QThread
 from PyQt5.QtGui import QFont, QPalette, QColor, QPixmap, QPainter, QBrush, QTextCursor, QPen
 
@@ -522,7 +522,7 @@ class AIAssistantGUI(QMainWindow):
             }
         """
         
-        button_style = """
+        self.button_style = button_style = """
             QPushButton {
                 background-color: #787878;
                 color: #FFFFFF;
@@ -1038,12 +1038,12 @@ class AIAssistantGUI(QMainWindow):
         self.prompt_text.setPlainText("Your name is Jarvis. You are a local AI assistant running on user's PC\nFirst you ask the user for his name, then continue the conversation using his/her name\n\nPERSONALITY:\n- Act natural, like with a close friend\n- Keep responses concise and on point\n- A little humor is welcome when appropriate\n\nLANGUAGE:\n- Always respond in the same language the user is speaking\n- If the user switches language mid-conversation, switch with them immediately\n\nSPEECH TO TEXT AWARENESS:\n- The user interacts with you via microphone\n- If something seems misspelled or unclear, use context to figure out what the user meant\n- Never point out transcription mistakes to the user\n\nTEXT TO SPEECH:\n- You talk to the user thru a TTS system with the voice of Jarvis\n- Avoid at any cost the use of ANY special characters or emoji otherwise you may sound unnatural\n\nMEMORY & CONTEXT:\n- You have access to conversation history and user context via RAG\n- Use this context naturally and don't announce that you're using it\n\nMCP TOOL USE:\n- When the user activates tool use mode, you will receive the available tools and their JSON schema dynamically\n- You detect when you are in tool use mode when user ask you to take an action that may match any possible combination of tools from the MCP server\n- In tool use mode, respond ONLY with valid JSON, no extra text, no explanations\n- In tool use mode you DON'T output commands that may affect the integrity of the data on user's machine UNLESS explicitly asked\n- In normal conversation mode, never output raw JSON\n\nBOUNDARIES:\n- You refuse any request that involves harming people or property\n- You refuse to engage in explicit sexual conversations\n- Do so briefly and respectfully, without lecturing\n")
         
         save_prompt_btn = QPushButton("Save Prompt", lm_frame)
-        save_prompt_btn.setGeometry(220, 312, 97, 20)
+        save_prompt_btn.setGeometry(217, 312, 100, 20)
         save_prompt_btn.setStyleSheet(button_style)
         save_prompt_btn.clicked.connect(self.save_prompt)
         
         load_prompt_btn = QPushButton("Load Prompt", lm_frame)
-        load_prompt_btn.setGeometry(115, 312, 97, 20)
+        load_prompt_btn.setGeometry(112, 312, 100, 20)
         load_prompt_btn.setStyleSheet(button_style)
         load_prompt_btn.clicked.connect(self.load_prompt)
         
@@ -1052,7 +1052,7 @@ class AIAssistantGUI(QMainWindow):
         wake_word_label.setStyleSheet("color: #FFFFFF; border: none;")
         
         self.wake_word_entry = QLineEdit(lm_frame)
-        self.wake_word_entry.setGeometry(117, 286, 45, 19)
+        self.wake_word_entry.setGeometry(114, 286, 45, 19)
         self.wake_word_entry.setText(self.wake_word)
         self.wake_word_entry.setStyleSheet("""
             QLineEdit {
@@ -1081,7 +1081,7 @@ class AIAssistantGUI(QMainWindow):
         radio_wake_off.setChecked(not self.wake_word_enabled)  # === Set as OFF if wake_word_enabled is False ===
         
         max_tokens_label = QLabel("Max Tokens", lm_frame)
-        max_tokens_label.setGeometry(188, 284, 80, 20)
+        max_tokens_label.setGeometry(185, 284, 80, 20)
         max_tokens_label.setStyleSheet("color: #FFFFFF; border: none;")
         
         self.max_tokens_entry = QLineEdit(lm_frame)
@@ -1118,7 +1118,7 @@ class AIAssistantGUI(QMainWindow):
         top_k_label.setStyleSheet("color: #FFFFFF; border: none;")
         
         self.top_k_entry = QLineEdit(lm_frame)
-        self.top_k_entry.setGeometry(117, 262, 45, 19)
+        self.top_k_entry.setGeometry(114, 262, 45, 19)
         self.top_k_entry.setText(str(self.top_k))
         self.top_k_entry.setStyleSheet("""
             QLineEdit {
@@ -1131,7 +1131,7 @@ class AIAssistantGUI(QMainWindow):
         self.top_k_entry.textChanged.connect(lambda text: setattr(self, 'top_k', int(text)) if text.isdigit() else None)
         
         repetition_penalty_label = QLabel("Repeat Penalty", lm_frame)
-        repetition_penalty_label.setGeometry(180, 260, 100, 20)
+        repetition_penalty_label.setGeometry(177, 260, 100, 20)
         repetition_penalty_label.setStyleSheet("color: #FFFFFF; border: none;")
         
         self.repetition_penalty_entry = QLineEdit(lm_frame)
@@ -1184,6 +1184,12 @@ class AIAssistantGUI(QMainWindow):
         system_frame.setGeometry(994, 326, 326, 330)
         system_frame.setStyleSheet(group_style)
 
+        # === About button ===
+        about_btn = QPushButton("About...", system_frame)
+        about_btn.setGeometry(217, 23, 100, 20)
+        about_btn.setStyleSheet(button_style)
+        about_btn.clicked.connect(self.show_about)
+
         # === LM Studio launch button ===
         open_lmstudio_btn = QPushButton("LM Studio", system_frame)
         open_lmstudio_btn.setGeometry(217, 214, 100, 20)
@@ -1198,9 +1204,9 @@ class AIAssistantGUI(QMainWindow):
         
         # === Resource Monitor ===
         resource_frame = QGroupBox(system_frame)
-        resource_frame.setGeometry(44, 128, 166, 68)  # Poziție în partea de sus
+        resource_frame.setGeometry(44, 133, 166, 62) 
         resource_frame.setStyleSheet("QGroupBox { border: 1px solid #FFFFFF; border-radius: 5px; background-color: #121212; }")
-        resource_frame.setTitle("")  # Fără titlu
+        resource_frame.setTitle("")
 
         # == Row 1: CPU și SRAM % ==
         self.cpu_sram_label = QLabel("CPU: 00.0%   SRAM: 00.0%", resource_frame)
@@ -1209,12 +1215,12 @@ class AIAssistantGUI(QMainWindow):
 
         # == Row 2: GPU și VRAM % ==
         self.gpu_vram_label = QLabel("GPU: 00.0%   VRAM: 00.0%", resource_frame)
-        self.gpu_vram_label.setGeometry(6, 30, 280, 20)
+        self.gpu_vram_label.setGeometry(6, 28, 280, 20)
         self.gpu_vram_label.setStyleSheet("color: #FFFFFF; border: none;")
 
         # == Row 3: Total SRAM și VRAM în GB ==
         self.total_label = QLabel("SRAM: 0.0 GB   VRAM: 0.0 GB", resource_frame)
-        self.total_label.setGeometry(6, 45, 280, 20)
+        self.total_label.setGeometry(6, 40, 280, 20)
         self.total_label.setStyleSheet("color: #FFFFFF; border: none;")
 
         # === Load images ===
@@ -1267,16 +1273,16 @@ class AIAssistantGUI(QMainWindow):
         
         # === Profile Image Frame (64x64) ===
         self.profile_image_label = ProfileFrame(system_frame)
-        self.profile_image_label.setGeometry(234, 30, 64, 64)
+        self.profile_image_label.setGeometry(234, 48, 64, 64)
 
         # === Profile Name Label ===
         self.profile_name_label = QLabel("", system_frame)
-        self.profile_name_label.setGeometry(192, 92, 148, 20)
+        self.profile_name_label.setGeometry(192, 108, 148, 20)
         self.profile_name_label.setStyleSheet("color: #FFFF96; border: none; font-weight: bold; font-size: 10pt;")
         self.profile_name_label.setAlignment(Qt.AlignCenter)
 
         sys_mon_label = QLabel("= System Monitor =", system_frame)
-        sys_mon_label.setGeometry(66, 124, 150, 20)
+        sys_mon_label.setGeometry(66, 128, 150, 20)
         sys_mon_label.setStyleSheet("color: #FFFFFF; border: none; font-weight: bold;")
 
         lm_server_label = QLabel("= LM Studio =", system_frame)
@@ -1314,7 +1320,7 @@ class AIAssistantGUI(QMainWindow):
         self.mcp_server_entry.textChanged.connect(lambda text: setattr(self, 'mcp_server', text))
         
         use_mcp_label = QLabel("Use MCP Server", system_frame)
-        use_mcp_label.setGeometry(219, 160, 100, 20)
+        use_mcp_label.setGeometry(219, 161, 100, 20)
         use_mcp_label.setStyleSheet("color: #FFFFFF; border: none; font-weight: bold; font-size: 9pt;")
         
         self.mcp_group = QButtonGroup(system_frame)
@@ -1331,20 +1337,20 @@ class AIAssistantGUI(QMainWindow):
         radio_mcp_no.setChecked(True)
         self.mcp_group.addButton(radio_mcp_no, 1)
         
-        real_talk_label = QLabel("Real Talk", system_frame)
-        real_talk_label.setGeometry(238, 124, 80, 20)
+        real_talk_label = QLabel("Use Real Talk", system_frame)
+        real_talk_label.setGeometry(226, 128, 80, 20)
         real_talk_label.setStyleSheet("color: #FFFFFF; border: none; font-weight: bold; font-size: 9pt;")
         
         self.real_talk_group = QButtonGroup(system_frame)
         
         radio_real_talk_yes = QRadioButton("Yes", system_frame)
-        radio_real_talk_yes.setGeometry(227, 140, 40, 20)
+        radio_real_talk_yes.setGeometry(227, 144, 40, 20)
         radio_real_talk_yes.setStyleSheet("color: #FFFFFF;")
         radio_real_talk_yes.toggled.connect(lambda checked: setattr(self, 'real_talk_enabled', True) if checked else None)
         self.real_talk_group.addButton(radio_real_talk_yes, 0)
         
         radio_real_talk_no = QRadioButton("No", system_frame)
-        radio_real_talk_no.setGeometry(269, 140, 40, 20)
+        radio_real_talk_no.setGeometry(269, 144, 40, 20)
         radio_real_talk_no.setStyleSheet("color: #FFFFFF;")
         radio_real_talk_no.setChecked(True)
         radio_real_talk_no.toggled.connect(lambda checked: setattr(self, 'real_talk_enabled', False) if checked else None)
@@ -3302,6 +3308,139 @@ NOW, based on the tool results above, what is your response?
         # === RAG indexing (ALWAYS) ===
         if self.rag_memory_enabled:
             self.rag_queue.put((role, text, timestamp))
+
+    def show_about(self):
+        """Shows the About dialog centered on screen"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("About...")
+        dialog.setFixedSize(400, 300)
+        dialog.setStyleSheet("background-color: #191919; color: #FFFFFF;")
+
+        # === Center on screen ===
+        screen = QApplication.primaryScreen().geometry()
+        x = (screen.width() - 400) // 2
+        y = (screen.height() - 300) // 2
+        dialog.move(x, y)
+
+        # === Version ===
+        version_label = QLabel("Version: 0.1.1 Beta", dialog)
+        version_label.setGeometry(140, 2, 200, 20)
+        version_label.setStyleSheet("color: #FFFF96; font-weight: bold; font-size: 10pt;")
+
+        # === Author ===
+        author_label = QLabel("Author: Nechifor Marian", dialog)
+        author_label.setGeometry(138, 18, 250, 20)
+        author_label.setStyleSheet("color: #FFFFFF; font-size: 9pt;")
+
+        # === Copyright ===
+        copyright_label = QLabel("Copyright: 2026 Nechifor Marian", dialog)
+        copyright_label.setGeometry(115, 35, 250, 20)
+        copyright_label.setStyleSheet("color: #AAAAAA; font-size: 9pt;")
+
+        # === License text ===
+        license_label = QLabel("This is a free software licensed under the GNU General Public License", dialog)
+        license_label.setGeometry(30, 56, 380, 10)
+        license_label.setStyleSheet("color: #AAAAAA; font-size: 8pt;")
+        license_label.setWordWrap(True)
+
+        # === License button ===
+        license_btn = QPushButton("License", dialog)
+        license_btn.setGeometry(166, 73, 75, 20)
+        license_btn.setStyleSheet(self.button_style)
+        license_btn.clicked.connect(self.show_license)
+
+        # === Social Media label ===
+        social_label = QLabel("Social Media", dialog)
+        social_label.setGeometry(166, 99, 100, 15)
+        social_label.setStyleSheet("color: #FFFFFF; font-weight: bold; font-size: 9pt;")
+
+        # === YouTube icon ===
+        yt_label = QLabel(dialog)
+        yt_label.setGeometry(75, 125, 32, 32)
+        yt_pixmap = QPixmap(os.path.join(GRAPHICS_DIR, "YouTube.png"))
+        if not yt_pixmap.isNull():
+            yt_label.setPixmap(yt_pixmap.scaled(32, 32, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        yt_text = QLabel("YouTube", dialog)
+        yt_text.setGeometry(64, 157, 65, 15)
+        yt_text.setStyleSheet("color: #FFFFFF; font-size: 9pt;")
+
+        # === Instagram icon ===
+        ig_label = QLabel(dialog)
+        ig_label.setGeometry(190, 125, 32, 32)
+        ig_pixmap = QPixmap(os.path.join(GRAPHICS_DIR, "Instagram.png"))
+        if not ig_pixmap.isNull():
+            ig_label.setPixmap(ig_pixmap.scaled(32, 32, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        ig_text = QLabel("Instagram", dialog)
+        ig_text.setGeometry(178, 157, 70, 15)
+        ig_text.setStyleSheet("color: #FFFFFF; font-size: 9pt;")
+
+        # === GitHub icon ===
+        gh_label = QLabel(dialog)
+        gh_label.setGeometry(300, 125, 32, 32)
+        gh_pixmap = QPixmap(os.path.join(GRAPHICS_DIR, "GitHub.png"))
+        if not gh_pixmap.isNull():
+            gh_label.setPixmap(gh_pixmap.scaled(32, 32, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        gh_text = QLabel("GitHub", dialog)
+        gh_text.setGeometry(297, 157, 55, 15)
+        gh_text.setStyleSheet("color: #FFFFFF; font-size: 9pt;")
+
+        # === Contact label ===
+        contact_label = QLabel("Contact", dialog)
+        contact_label.setGeometry(180, 182, 100, 20)
+        contact_label.setStyleSheet("color: #FFFFFF; font-weight: bold; font-size: 9pt;")
+
+        # === Gmail icon ===
+        gm_label = QLabel(dialog)
+        gm_label.setGeometry(190, 210, 175, 32)
+        gm_pixmap = QPixmap(os.path.join(GRAPHICS_DIR, "Gmail.png"))
+        if not gm_pixmap.isNull():
+            gm_label.setPixmap(gm_pixmap.scaled(32, 32, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        gm_text = QLabel("diwhy.engineering.86@gmail.com", dialog)
+        gm_text.setGeometry(115, 242, 250, 15)
+        gm_text.setStyleSheet("color: #FFFFFF; font-size: 9pt;")
+
+        dialog.exec_()
+
+    def show_license(self):
+        """Shows the LICENSE file content in a scrollable dialog"""
+        license_path = os.path.join(BASE_DIR, "LICENSE")
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("License")
+        dialog.setFixedSize(600, 800)
+        dialog.setStyleSheet("background-color: #191919; color: #FFFFFF;")
+
+        # === Center on screen ===
+        screen = QApplication.primaryScreen().geometry()
+        x = (screen.width() - 600) // 2
+        y = (screen.height() - 800) // 2
+        dialog.move(x, y)
+
+        # === Text area ===
+        text_area = QTextEdit(dialog)
+        text_area.setGeometry(10, 10, 580, 780)
+        text_area.setReadOnly(True)
+        text_area.setStyleSheet("""
+            QTextEdit {
+                background-color: #121212;
+                color: #FFFFFF;
+                border: 1px solid #444444;
+                border-radius: 5px;
+                font-family: Courier New;
+                font-size: 9pt;
+            }
+        """ + SCROLLBAR_STYLE)
+
+        # === Load LICENSE file ===
+        try:
+            with open(license_path, 'r', encoding='utf-8') as f:
+                text_area.setPlainText(f.read())
+        except FileNotFoundError:
+            text_area.setPlainText("LICENSE file not found.")
+        except Exception as e:
+            text_area.setPlainText(f"Error loading LICENSE file:\n{str(e)}")
+
+        dialog.exec_()
 
     def open_lm_studio(self):
         """Search and launch LM Studio from common installation paths"""
