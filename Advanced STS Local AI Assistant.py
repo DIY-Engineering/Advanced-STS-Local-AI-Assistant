@@ -1066,14 +1066,14 @@ class AIAssistantGUI(QMainWindow):
         
         self.wake_word_group = QButtonGroup(lm_frame)
         
-        radio_wake_on = QRadioButton("Yes", lm_frame)
+        radio_wake_on = QRadioButton("On", lm_frame)
         radio_wake_on.setGeometry(16, 313, 40, 20)
         radio_wake_on.setStyleSheet("color: #FFFFFF;")
         radio_wake_on.setChecked(self.wake_word_enabled)
         radio_wake_on.toggled.connect(lambda checked: setattr(self, 'wake_word_enabled', True) if checked else None)
         self.wake_word_group.addButton(radio_wake_on, 0)
         
-        radio_wake_off = QRadioButton("No", lm_frame)
+        radio_wake_off = QRadioButton("Off", lm_frame)
         radio_wake_off.setGeometry(58, 313, 40, 20)
         radio_wake_off.setStyleSheet("color: #FFFFFF;")
         radio_wake_off.toggled.connect(lambda checked: setattr(self, 'wake_word_enabled', False) if checked else None)
@@ -1319,37 +1319,37 @@ class AIAssistantGUI(QMainWindow):
         """)
         self.mcp_server_entry.textChanged.connect(lambda text: setattr(self, 'mcp_server', text))
         
-        use_mcp_label = QLabel("Use MCP Server", system_frame)
-        use_mcp_label.setGeometry(219, 161, 100, 20)
+        use_mcp_label = QLabel("MCP Server", system_frame)
+        use_mcp_label.setGeometry(230, 161, 100, 20)
         use_mcp_label.setStyleSheet("color: #FFFFFF; border: none; font-weight: bold; font-size: 9pt;")
         
         self.mcp_group = QButtonGroup(system_frame)
         
-        radio_mcp_yes = QRadioButton("Yes", system_frame)
+        radio_mcp_yes = QRadioButton("On", system_frame)
         radio_mcp_yes.setGeometry(227, 180, 40, 20)
         radio_mcp_yes.setStyleSheet("color: #FFFFFF;")
         radio_mcp_yes.toggled.connect(lambda checked: self.update_system_prompt_with_mcp(checked))
         self.mcp_group.addButton(radio_mcp_yes, 0)
         
-        radio_mcp_no = QRadioButton("No", system_frame)
+        radio_mcp_no = QRadioButton("Off", system_frame)
         radio_mcp_no.setGeometry(269, 180, 40, 20)
         radio_mcp_no.setStyleSheet("color: #FFFFFF;")
         radio_mcp_no.setChecked(True)
         self.mcp_group.addButton(radio_mcp_no, 1)
         
-        real_talk_label = QLabel("Use Real Talk", system_frame)
-        real_talk_label.setGeometry(226, 128, 80, 20)
+        real_talk_label = QLabel("Real Talk", system_frame)
+        real_talk_label.setGeometry(238, 128, 80, 20)
         real_talk_label.setStyleSheet("color: #FFFFFF; border: none; font-weight: bold; font-size: 9pt;")
         
         self.real_talk_group = QButtonGroup(system_frame)
         
-        radio_real_talk_yes = QRadioButton("Yes", system_frame)
+        radio_real_talk_yes = QRadioButton("On", system_frame)
         radio_real_talk_yes.setGeometry(227, 144, 40, 20)
         radio_real_talk_yes.setStyleSheet("color: #FFFFFF;")
         radio_real_talk_yes.toggled.connect(lambda checked: setattr(self, 'real_talk_enabled', True) if checked else None)
         self.real_talk_group.addButton(radio_real_talk_yes, 0)
         
-        radio_real_talk_no = QRadioButton("No", system_frame)
+        radio_real_talk_no = QRadioButton("Off", system_frame)
         radio_real_talk_no.setGeometry(269, 144, 40, 20)
         radio_real_talk_no.setStyleSheet("color: #FFFFFF;")
         radio_real_talk_no.setChecked(True)
@@ -3356,33 +3356,36 @@ NOW, based on the tool results above, what is your response?
 
         # === YouTube icon ===
         yt_label = QLabel(dialog)
-        yt_label.setGeometry(75, 125, 32, 32)
+        yt_label.setGeometry(75, 122, 32, 32)
         yt_pixmap = QPixmap(os.path.join(GRAPHICS_DIR, "YouTube.png"))
         if not yt_pixmap.isNull():
             yt_label.setPixmap(yt_pixmap.scaled(32, 32, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        yt_text = QLabel("YouTube", dialog)
+        yt_text = QLabel('<a href="https://www.youtube.com/@DIY_Engineering" style="color: #FFFF96; text-decoration: none;">YouTube</a>', dialog)
         yt_text.setGeometry(64, 157, 65, 15)
-        yt_text.setStyleSheet("color: #FFFFFF; font-size: 9pt;")
+        yt_text.setStyleSheet("font-size: 9pt;")
+        yt_text.setOpenExternalLinks(True)
 
         # === Instagram icon ===
         ig_label = QLabel(dialog)
-        ig_label.setGeometry(190, 125, 32, 32)
+        ig_label.setGeometry(190, 122, 32, 32)
         ig_pixmap = QPixmap(os.path.join(GRAPHICS_DIR, "Instagram.png"))
         if not ig_pixmap.isNull():
             ig_label.setPixmap(ig_pixmap.scaled(32, 32, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        ig_text = QLabel("Instagram", dialog)
+        ig_text = QLabel('<a href="https://www.instagram.com/diwhy_engineering/" style="color: #FFFF96; text-decoration: none;">Instagram</a>', dialog)
         ig_text.setGeometry(178, 157, 70, 15)
-        ig_text.setStyleSheet("color: #FFFFFF; font-size: 9pt;")
+        ig_text.setStyleSheet("font-size: 9pt;")
+        ig_text.setOpenExternalLinks(True)
 
         # === GitHub icon ===
         gh_label = QLabel(dialog)
-        gh_label.setGeometry(300, 125, 32, 32)
+        gh_label.setGeometry(300, 122, 32, 32)
         gh_pixmap = QPixmap(os.path.join(GRAPHICS_DIR, "GitHub.png"))
         if not gh_pixmap.isNull():
             gh_label.setPixmap(gh_pixmap.scaled(32, 32, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        gh_text = QLabel("GitHub", dialog)
+        gh_text = QLabel('<a href="https://github.com/DIY-Engineering" style="color: #FFFF96; text-decoration: none;">GitHub</a>', dialog)
         gh_text.setGeometry(297, 157, 55, 15)
-        gh_text.setStyleSheet("color: #FFFFFF; font-size: 9pt;")
+        gh_text.setStyleSheet("font-size: 9pt;")
+        gh_text.setOpenExternalLinks(True)
 
         # === Contact label ===
         contact_label = QLabel("Contact", dialog)
@@ -3407,29 +3410,31 @@ NOW, based on the tool results above, what is your response?
 
         dialog = QDialog(self)
         dialog.setWindowTitle("License")
-        dialog.setFixedSize(600, 800)
+        dialog.setFixedSize(560, 800)
         dialog.setStyleSheet("background-color: #191919; color: #FFFFFF;")
 
         # === Center on screen ===
         screen = QApplication.primaryScreen().geometry()
-        x = (screen.width() - 600) // 2
+        x = (screen.width() - 560) // 2
         y = (screen.height() - 800) // 2
         dialog.move(x, y)
 
         # === Text area ===
         text_area = QTextEdit(dialog)
-        text_area.setGeometry(10, 10, 580, 780)
+        text_area.setGeometry(6, 6, 548, 788)
         text_area.setReadOnly(True)
+        text_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        text_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         text_area.setStyleSheet("""
             QTextEdit {
                 background-color: #121212;
                 color: #FFFFFF;
-                border: 1px solid #444444;
+                border: 2px solid #FFFFFF;
                 border-radius: 5px;
                 font-family: Courier New;
                 font-size: 9pt;
             }
-        """ + SCROLLBAR_STYLE)
+        """)
 
         # === Load LICENSE file ===
         try:
