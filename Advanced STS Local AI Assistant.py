@@ -119,7 +119,7 @@ WHISPER_MODELS_DIR = os.path.join(BASE_DIR, "Whisper STT", "Models")
 GRAPHICS_DIR       = os.path.join(BASE_DIR, "Graphics")
 RAG_EMBEDDER_DIR   = os.path.join(BASE_DIR, "RAG Embedder", "MiniLM-L6-v2")
 RAG_DATABASE_DIR   = os.path.join(BASE_DIR, "RAG Vector Database")
-# === All folders above are created at startup by create_folder_structure() ===
+# === All folders above are created at startup by "create_folder_structure()" ===
 CHUNK = 512
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
@@ -361,6 +361,7 @@ class AIAssistantGUI(QMainWindow):
     show_warning_signal  = pyqtSignal(str, str)
     vu_input_signal      = pyqtSignal(int)   # === VU Meter microphone — thread-safe ===
     vu_output_signal     = pyqtSignal(int)   # === VU Meter TTS output — thread-safe ===
+    chat_update_signal   = pyqtSignal(str, str, str)  # === Thread-safe chat update: role, text, color ===
 
     def __init__(self):
         super().__init__()
@@ -374,6 +375,7 @@ class AIAssistantGUI(QMainWindow):
         self.show_warning_signal.connect(self.show_thread_safe_warning)
         self.vu_input_signal.connect(lambda lvl: self.vu_meter_input.set_level(lvl))
         self.vu_output_signal.connect(lambda lvl: self.vu_meter_output.set_level(lvl))
+        self.chat_update_signal.connect(self._append_chat_safe)  # === Thread-safe chat update ===
 
         screen = QApplication.primaryScreen().geometry()
         x = (screen.width() - 1326) // 2
@@ -411,7 +413,7 @@ class AIAssistantGUI(QMainWindow):
         self.whisper_device = "cuda" if torch.cuda.is_available() else "cpu"  
         self.whisper_model = "small"
         self.faster_whisper_model = None
-        self.whisper_compute_type = "int8"  # === Set int8/float16/float32 depending on your hardware ===
+        self.whisper_compute_type = "int8"  # === Set int8/float16/float32 depending on your hardware support ===
         self.current_whisper_device = self.whisper_device
         self.current_whisper_model = None  # === Track current loaded model name ===
         self.coqui_device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -1035,7 +1037,7 @@ class AIAssistantGUI(QMainWindow):
         
        # === System Prompt === 
         
-        self.prompt_text.setPlainText("Your name is Jarvis. You are a local AI assistant running on user's PC\nFirst you ask the user for his name, then continue the conversation using his/her name\n\nPERSONALITY:\n- Act natural, like with a close friend\n- Keep responses concise and on point\n- A little humor is welcome when appropriate\n\nLANGUAGE:\n- Always respond in the same language the user is speaking\n- If the user switches language mid-conversation, switch with them immediately\n\nSPEECH TO TEXT AWARENESS:\n- The user interacts with you via microphone\n- If something seems misspelled or unclear, use context to figure out what the user meant\n- Never point out transcription mistakes to the user\n\nTEXT TO SPEECH:\n- You talk to the user thru a TTS system with the voice of Jarvis\n- Avoid at any cost the use of ANY special characters or emoji otherwise you may sound unnatural\n\nMEMORY & CONTEXT:\n- You have access to conversation history and user context via RAG\n- Use this context naturally and don't announce that you're using it\n\nMCP TOOL USE:\n- When the user activates tool use mode, you will receive the available tools and their JSON schema dynamically\n- You detect when you are in tool use mode when user ask you to take an action that may match any possible combination of tools from the MCP server\n- In tool use mode, respond ONLY with valid JSON, no extra text, no explanations\n- In tool use mode you DON'T output commands that may affect the integrity of the data on user's machine UNLESS explicitly asked\n- In normal conversation mode, never output raw JSON\n\nBOUNDARIES:\n- You refuse any request that involves harming people or property\n- You refuse to engage in explicit sexual conversations\n- Do so briefly and respectfully, without lecturing\n")
+        self.prompt_text.setPlainText("Your name is Jarvis. You are a local AI assistant running on user's PC\nFirst you ask the user for his name, then continue the conversation using his/her name\n\nPERSONALITY:\n- Act natural, like with a close friend\n- Keep responses concise and on point\n- A little humor is welcome when appropriate\n\nLANGUAGE:\n- Always respond in the same language the user is speaking\n- If the user switches language mid-conversation, switch with them immediately\n\nSPEECH TO TEXT AWARENESS:\n- The user interacts with you via microphone\n- If something seems misspelled or unclear, use context to figure out what the user meant\n- Never point out transcription mistakes to the user\n\nTEXT TO SPEECH:\n- You talk to the user thru a TTS system with the voice of Jarvis\n- DO NOT USE ANY special characters or emoji otherwise you may sound unnatural\n\nMEMORY & CONTEXT:\n- You have access to conversation history and user context via RAG\n- Use this context naturally and don't announce that you're using it\n\nMCP TOOL USE:\n- When the user activates tool use mode, you will receive the available tools and their JSON schema dynamically\n- You detect when you are in tool use mode when user ask you to take an action that may match any possible combination of tools from the MCP server\n- In tool use mode, respond ONLY with valid JSON, no extra text, no explanations\n- In tool use mode you DON'T output commands that may affect the integrity of the data on user's machine UNLESS explicitly asked\n- In normal conversation mode, never output raw JSON\n\nBOUNDARIES:\n- You refuse any request that involves harming people or property\n- You refuse to engage in explicit sexual conversations\n- Do so briefly and respectfully, without lecturing\n")
         
         save_prompt_btn = QPushButton("Save Prompt", lm_frame)
         save_prompt_btn.setGeometry(217, 312, 100, 20)
@@ -1529,6 +1531,15 @@ class AIAssistantGUI(QMainWindow):
         self.debug_text.setTextColor(QColor(color))
         self.debug_text.insertPlainText(msg + "\n")
         self.debug_text.verticalScrollBar().setValue(self.debug_text.verticalScrollBar().maximum())
+
+    def _append_chat_safe(self, role, text, color):
+        """Slot — always runs on main thread via signal. Safe to touch GUI widgets."""
+        self.chat_text.setTextColor(QColor(color))
+        self.chat_text.append(f"{role}: {text}\n")
+        cursor = self.chat_text.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self.chat_text.setTextCursor(cursor)
+        self.chat_text.verticalScrollBar().setValue(self.chat_text.verticalScrollBar().maximum())
 
     def cleanup_audio_resources(self):
         with contextlib.suppress(Exception):
@@ -2487,6 +2498,7 @@ class AIAssistantGUI(QMainWindow):
                     self.coqui_model = None 
                 finally:
                     self.tts_active = False
+                    self.stop_tts_flag.clear()  # === Safe to clear here — playback finished or interrupted, queue already empty ===
                     self.vu_output_signal.emit(0)
                     if completion_event is not None:
                         completion_event.set()
@@ -2573,7 +2585,7 @@ class AIAssistantGUI(QMainWindow):
                 
             models_url = f"{base_url}/v1/models"
             
-            # === We add timeoutn 3 seconds so that the application does not freeze at startup ===
+            # === We add timeout 3 seconds so that the application does not freeze at startup ===
             response = requests.get(models_url, timeout=3)
             
             if response.status_code == 200:
@@ -2674,8 +2686,8 @@ class AIAssistantGUI(QMainWindow):
                 if device == "cpu":
                     compute_type = "int8"  # === CPU: int8 is the fastest ===
                 else:
-                    # === GPU: float16 for maximum compatibility. If on runtime you get an error set it to float32 ===
-                    compute_type = "float32"
+                    # === GPU: float16 for maximum compatibility (RTX GPUs ONLY). If you use non RTX GPUs set to int8 or float32 (int8 uses less VRAM and is faster... whisper😅)===
+                    compute_type = "int8"
             
                 logging.info(f"📥 Loading Faster-Whisper: {model_name} from {model_path}")
                 logging.info(f"⚙️ Device: {device} | Compute: {compute_type}")
@@ -3292,14 +3304,7 @@ NOW, based on the tool results above, what is your response?
         if visible:
             display_role = role
             color = "#00B200" if display_role == "User" else "#FFFF96"
-            self.chat_text.setTextColor(QColor(color))
-            self.chat_text.append(f"{display_role}: {text}\n")
-        
-            # === Auto scroll ===
-            cursor = self.chat_text.textCursor()
-            cursor.movePosition(QTextCursor.End)
-            self.chat_text.setTextCursor(cursor)
-            self.chat_text.verticalScrollBar().setValue(self.chat_text.verticalScrollBar().maximum())
+            self.chat_update_signal.emit(display_role, text, color)  # === Thread-safe: never touch widget directly ===
     
         # === Save to file (ALWAYS) ===
         with open(self.current_chat_log, "a", encoding="utf-8") as f:
@@ -3398,9 +3403,10 @@ NOW, based on the tool results above, what is your response?
         gm_pixmap = QPixmap(os.path.join(GRAPHICS_DIR, "Gmail.png"))
         if not gm_pixmap.isNull():
             gm_label.setPixmap(gm_pixmap.scaled(32, 32, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        gm_text = QLabel("diwhy.engineering.86@gmail.com", dialog)
-        gm_text.setGeometry(115, 242, 250, 15)
-        gm_text.setStyleSheet("color: #FFFFFF; font-size: 9pt;")
+        gm_text = QLabel('<a href="mailto:diwhy.engineering.86@gmail.com" style="color: #FFFF96; text-decoration: none;">diwhy.engineering.86@gmail.com</a>', dialog)
+        gm_text.setGeometry(115, 244, 250, 15)
+        gm_text.setStyleSheet("font-size: 9pt;")
+        gm_text.setOpenExternalLinks(True)
 
         dialog.exec_()
 
@@ -3869,7 +3875,7 @@ NOW, based on the tool results above, what is your response?
         self.top_p_slider.setValue(95)
 
         # === SYSTEM PROMPT ===
-        self.prompt_text.setPlainText("Your name is Jarvis. You are a local AI assistant running on user's PC\nFirst you ask the user for his name, then continue the conversation using his/her name\n\nPERSONALITY:\n- Act natural, like with a close friend\n- Keep responses concise and on point\n- A little humor is welcome when appropriate\n\nLANGUAGE:\n- Always respond in the same language the user is speaking\n- If the user switches language mid-conversation, switch with them immediately\n\nSPEECH TO TEXT AWARENESS:\n- The user interacts with you via microphone\n- If something seems misspelled or unclear, use context to figure out what the user meant\n- Never point out transcription mistakes to the user\n\nTEXT TO SPEECH:\n- You talk to the user thru a TTS system with the voice of Jarvis\n- Avoid at any cost the use of ANY special characters or emoji otherwise you may sound unnatural\n\nMEMORY & CONTEXT:\n- You have access to conversation history and user context via RAG\n- Use this context naturally and don't announce that you're using it\n\nMCP TOOL USE:\n- When the user activates tool use mode, you will receive the available tools and their JSON schema dynamically\n- You detect when you are in tool use mode when user ask you to take an action that may match any possible combination of tools from the MCP server\n- In tool use mode, respond ONLY with valid JSON, no extra text, no explanations\n- In tool use mode you DON'T output commands that may affect the integrity of the data on user's machine UNLESS explicitly asked\n- In normal conversation mode, never output raw JSON\n\nBOUNDARIES:\n- You refuse any request that involves harming people or property\n- You refuse to engage in explicit sexual conversations\n- Do so briefly and respectfully, without lecturing\n")
+        self.prompt_text.setPlainText("Your name is Jarvis. You are a local AI assistant running on user's PC\nFirst you ask the user for his name, then continue the conversation using his/her name\n\nPERSONALITY:\n- Act natural, like with a close friend\n- Keep responses concise and on point\n- A little humor is welcome when appropriate\n\nLANGUAGE:\n- Always respond in the same language the user is speaking\n- If the user switches language mid-conversation, switch with them immediately\n\nSPEECH TO TEXT AWARENESS:\n- The user interacts with you via microphone\n- If something seems misspelled or unclear, use context to figure out what the user meant\n- Never point out transcription mistakes to the user\n\nTEXT TO SPEECH:\n- You talk to the user thru a TTS system with the voice of Jarvis\n- DO NOT USE ANY special characters or emoji otherwise you may sound unnatural\n\nMEMORY & CONTEXT:\n- You have access to conversation history and user context via RAG\n- Use this context naturally and don't announce that you're using it\n\nMCP TOOL USE:\n- When the user activates tool use mode, you will receive the available tools and their JSON schema dynamically\n- You detect when you are in tool use mode when user ask you to take an action that may match any possible combination of tools from the MCP server\n- In tool use mode, respond ONLY with valid JSON, no extra text, no explanations\n- In tool use mode you DON'T output commands that may affect the integrity of the data on user's machine UNLESS explicitly asked\n- In normal conversation mode, never output raw JSON\n\nBOUNDARIES:\n- You refuse any request that involves harming people or property\n- You refuse to engage in explicit sexual conversations\n- Do so briefly and respectfully, without lecturing\n")
 
         # === Reset profile paths to default "Jarvis" ===
         self.switch_profile_paths("Jarvis")
