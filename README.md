@@ -1,4 +1,4 @@
-Advanced STS Local AI Assistant
+# Advanced STS Local AI Assistant
 
 A fully local, privacy first AI assistant that runs entirely on your machine, no cloud, no subscriptions, no data leaving your PC. It combines speech recognition, a large language model, text to speech, a RAG database and a Powerfull MCP Server with a modular plugin architecture into a single easy to use desktop application.
 
