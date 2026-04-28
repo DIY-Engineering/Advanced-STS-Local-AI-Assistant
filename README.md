@@ -5,17 +5,19 @@ A fully local, privacy first AI assistant that runs entirely on your machine, no
 ![Description](Graphics/Main-GUI.png)
 
 ![Description](Graphics/MCP-GUI.png)
+Demo Video : ```https://www.youtube.com/watch?v=V0Aa8dKgbi0&t=141s```
 
-Key Features:
+Key Features :
 
 - 🎙️ STT - Faster Whisper with Silero VAD for accurate, low-latency voice detection/transcription
 - 🤖 LLM Integration - Connects to LM Studio to run any local language model you wish
-- 🔊 TTS - Coqui XTTS-V2 for natural, cloneable voice synthesis ```Beats Eleven Labs on Voice Quality```
+- 🔊 TTS - Coqui XTTS-V2 for natural, cloneable voice synthesis ```On Par With Eleven Labs on Voice Quality```
 - 💬 Chat History - Persistent conversation log with full context management ```Chat History is saved as a .txt file for backup and GUI continuity between sessions. It is also used to manually rebuild RAG Database if it gets corrupted/deleted```
 - 🧠 RAG Database - MiniLM-L6-v2 + ChromaDB for Semantic very-long-term memory and document retrieval: ```.pdf .txt``` ```There is NO limit on how much it can remember😊```
 - 🔌 MCP Server - Modular plugin system for extending the assistant's capabilities ```Supports: Google Services, Windows CLI, Home Assistant, Telegram, Signal and more to come```
 - 🐍 Architecture - Full Python ```with two C++ backends: faster-whisper and ChromaDB```
 - 🖥️ GUI - PyQt5 for a clean and modern desktop interface ```Control Pannel Style```
+
 
 System Requirements :
 
@@ -150,7 +152,7 @@ Full pinned dependency list: ```Dependencies/Requirements.txt```
 
 🚀 First Launch 🚀
 
-1. Make sure LM Studio is running, the local server is started and that you have at least one model downloaded, for starters i recommend ```qwen2.5-7b-instruct-1m Q4_K_M.gguf``` a verry capable model for its size
+1. Make sure LM Studio is running, the local server is started and that you have at least one model downloaded, for starters i recommend ```Gemma-4-E4B-Uncensored-HauhauCS-Aggressive``` a verry capable SOTA Model
 2. Run the main application:  ```python "Advanced STS Local AI Assistant.py"``` or just double-click ```be patient here, it has to load Heavy Dependencies😊```
 3. Select your microphone and audio output device from the dropdowns ```by default it uses Microsoft Sound Mapper for input/output```
 4. Select your preferred Whisper model. Use "Medium" for best speed/accuracy balance 
@@ -176,15 +178,15 @@ Troubleshooting :
 
 ```LM Studio connection error```
 → Make sure the LM Studio local server is running on ```http://localhost:1234``` before launching the assistant.
+#
+Author :  Nechifor Marian
 
-Author :  Nechifor Marian 
-
-
-        Acknowledgements:
+Acknowledgements:
                            
-     -  Faster-Whisper -  https://github.com/SYSTRAN/faster-whisper
-     -  Coqui TTS -  https://github.com/coqui-ai/TTS
-     -  Silero VAD -  https://github.com/snakers4/silero-vad
-     -  ChromaDB -  https://github.com/chroma-core/chroma
-     -  LM Studio -  https://lmstudio.ai
-     -  Sentence Transformers -  https://github.com/UKPLab/sentence-transformers
+-  Faster-Whisper - ```https://github.com/SYSTRAN/faster-whisper```
+-  Coqui TTS - ```https://github.com/coqui-ai/TTS```
+-  Silero VAD - ```https://github.com/snakers4/silero-vad```
+-  ChromaDB - ```https://github.com/chroma-core/chroma```
+-  LM Studio - ```https://lmstudio.ai```
+-  Sentence Transformers - ```https://github.com/UKPLab/sentence-transformers```
+
