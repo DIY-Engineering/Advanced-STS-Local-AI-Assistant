@@ -19,15 +19,15 @@ Key Features :
 - 🖥️ GUI - PyQt5 for a clean and modern desktop interface ```Control Pannel Style```
 
 
-System Requirements :
+Minimum System Requirements :
 
 | Component |          Requirement        |
 |-----------|-----------------------------|
 | OS        | Windows 10 / 11 (64-Bit)    |
 | Python    | 3.12.6 X64                  |    
-| GPU       | RTX 3060 12GB or better     |
-| CUDA      | 12.1                        |
-| cuDNN     | 9.1.2                       |
+| GPU       | GTX 1060 6GB or better      |
+| CUDA      | 12.8                        |
+| cuDNN     | 9.12                       |
 | RAM       | 16GB or more                |
 | Storage   | 20GB Free space             |
 | LLM Server| LM Studio 0.4.4             |
@@ -48,15 +48,15 @@ Some packages require C++ compilation. Download and install the Build Tools from
 ```https://visualstudio.microsoft.com/visual-cpp-build-tools/```
 During installation, select ```Desktop development with C++```.
 
-Step 3 - Install NVIDIA CUDA 12.1 and cuDNN 9.1.2
+Step 3 - Install NVIDIA CUDA 12.8 and cuDNN 9.12
 
-CUDA 12.1: ```https://developer.nvidia.com/cuda-12-1-0-download-archive```
-cuDNN 9.1.2: ```https://developer.nvidia.com/cudnn``` (requires free NVIDIA account)
+CUDA 12.8: ```https://developer.nvidia.com/cuda-12-1-0-download-archive```
+cuDNN 9.12: ```https://developer.nvidia.com/cudnn``` (requires free NVIDIA account)
 
  Step 4 - Install LM Studio
 
 Download and install LM Studio: ```https://lmstudio.ai```
-I recommend starting with ```qwen2.5-7b-instruct-1m Q4_K_M.gguf``` model, because in my case it offered the best results. To download go to LM-Studio Model Search tab, or hit ```ctrl + shift + M```. 
+I recommend starting with ```gemma-4-e2b-it-uncensored-Q4_K_M.gguf``` model, because in my case it offered the best results. To download go to LM-Studio Model Search tab, or hit ```ctrl + shift + M```. 
 Next go to ```Developer/Local Server``` tab, turn ON the local server, open ```server settings``` and turn ON ```enable CORS```, ```JIT Model loading``` and ```Only Keep Last JIT Model Loaded```.
 Next time you reboot your PC LM-Studio will auto-start in sys tray.
 
@@ -71,7 +71,7 @@ Step 6 - Run the ```Setup.py``` Script
 The setup script handles everything automatically:
 - ✅ Verifies you are using Python 3.12.6 X64
 - ✅ Creates the full project folder structure
-- ✅ Installs PyTorch with CUDA 12.1
+- ✅ Installs PyTorch with CUDA 12.8
 - ✅ Installs all required Python packages
 - ✅ Downloads and installs all AI models
 
@@ -111,6 +111,7 @@ Advanced STS Local AI Assistant\
 ├── Debug Logs\                          ← Application logs
 ├── Dependencies\                        ← Additional local dependencies
 ├── Graphics\                            ← UI assets
+├── MCP                                  ← Tool Chain Rules File
 ├── MCP Server\
 │   ├── Graphics\
 │   └── Plugins\                         ← MCP plugin scripts
@@ -143,7 +144,7 @@ All dependencies are installed automatically by ```Setup.py```. For reference, h
 | LLM                      | transformers, sentence-transformers         |
 | Audio                    | PyAudio, pydub, soundfile, librosa          |
 | RAG / Vector DB          | chromadb, sentence-transformers             |
-| Deep Learning            | PyTorch 2.5.1 + CUDA 12.1                   |
+| Deep Learning            | PyTorch 2.7.0 + CUDA 12.8                   |
 | Google APIs              | google-auth, google-api-python-client       |
 | MCP Protocol             | mcp                                         |
 | UI Server                | uvicorn, starlette, websockets              |
@@ -152,7 +153,7 @@ Full pinned dependency list: ```Dependencies/Requirements.txt```
 
 🚀 First Launch 🚀
 
-1. Make sure LM Studio is running, the local server is started and that you have at least one model downloaded, for starters i recommend ```Gemma-4-E4B-Uncensored-HauhauCS-Aggressive``` a verry capable SOTA Model
+1. Make sure LM Studio is running, the local server is started and that you have at least one model downloaded, for starters i recommend ```gemma-4-e2b-it-uncensored-Q4_K_M.gguf``` a verry capable SOTA Model
 2. Run the main application:  ```python "Advanced STS Local AI Assistant.py"``` or just double-click ```be patient here, it has to load Heavy Dependencies😊```
 3. Select your microphone and audio output device from the dropdowns ```by default it uses Microsoft Sound Mapper for input/output```
 4. Select your preferred Whisper model. Use "Medium" for best speed/accuracy balance 
