@@ -1,5 +1,5 @@
 # ====================================================================================
-# Requirements for Advanced STS Local AI Assistant 0.1.0 Beta + MCP Server 1.0.1 Beta
+# Requirements for Advanced STS Local AI Assistant 0.1.1 Beta + MCP Server 0.1.1 Beta
 # ====================================================================================
 # Compatible versions tested and confirmed as working !!!
 # Install with: pip install -r requirements.txt
@@ -7,9 +7,9 @@
 
 ###############################################################
 #  Python 3.12.6 X64                                          #
-#  LM-Studio 0.4.4                                            #
-#  nVidia GPU With Latest Driver (RTX 3060 12GB) - At least   #
-#  nVidia CUDA 12.1                                           #
+#  LM-Studio 0.4.1                                            #
+#  nVidia GPU With Latest Driver (Starting from GTX1060 6GB)  #
+#  nVidia CUDA 12.8                                           #
 #  nVidia CUDDN 9.12                                          #
 #  VS Build tools                                             #
 ###############################################################
@@ -52,10 +52,10 @@ huggingface-hub==0.36.0
 openai-whisper==20250625
 
 # PyTorch — install separately with CUDA flag (see notes below)
-# pip install torch==2.5.1+cu121 torchaudio==2.5.1+cu121 torchvision==0.20.1+cu121 --index-url https://download.pytorch.org/whl/cu121
-torch==2.5.1+cu121
-torchaudio==2.5.1+cu121
-torchvision==0.20.1+cu121
+# pip install torch==2.7.0+cu128 torchaudio==2.7.0+cu128 torchvision==0.22.0+cu128 --index-url https://download.pytorch.org/whl/cu128
+torch==2.7.0+cu128
+torchaudio==2.7.0+cu128
+torchvision==0.22.0+cu128
 
 # Transformers & Embeddings
 transformers==4.55.4
@@ -151,13 +151,12 @@ pyinstaller==6.18.0
 
 # ====================================================================================
 # INSTALLATION NOTES:
-# 1. Install PyTorch with CUDA first:
-#    pip install torch==2.5.1+cu121 torchaudio==2.5.1+cu121 torchvision==0.20.1+cu121 --index-url https://download.pytorch.org/whl/cu121
+# 1. Install PyTorch with CUDA 12.8 Support first:
+#    pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 #
 # 2. Install PyTorch CPU only (no GPU):
-#    pip install torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 --index-url https://download.pytorch.org/whl/cpu
+#    pip3 install torch torchvision torchaudio
 #
 # 3. Then install remaining packages:
 #    pip install -r requirements.txt
-
 # ====================================================================================
