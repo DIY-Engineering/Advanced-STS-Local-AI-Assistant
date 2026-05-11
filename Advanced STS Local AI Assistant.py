@@ -90,7 +90,7 @@ _created = create_folder_structure()
 
 # ====== LOGGING CONFIG ======
 MCP_SERVER_DIR  = os.path.join(BASE_DIR, "MCP Server")
-MCP_SERVER_FILE = os.path.join(MCP_SERVER_DIR, "MCP Server.py")
+MCP_SERVER_FILE = os.path.join(MCP_SERVER_DIR, "MCP Server 0.1.1 Beta.py")
 LOG_DIR = os.path.join(BASE_DIR, "Debug Logs")
 
 class Utf8StreamHandler(logging.StreamHandler):
@@ -367,7 +367,7 @@ class AIAssistantGUI(QMainWindow):
         super().__init__()
         
         # ====== INITIALIZE GUI ======
-        self.setWindowTitle("= Advanced STS Local AI Assistant 0.1.1 Beta =")
+        self.setWindowTitle("= Advanced STS Local AI Assistant 0.1.2 Beta =")
         self.setGeometry(0, 0, 1326, 663)
         self.setFixedSize(1326, 663)
         
@@ -887,7 +887,7 @@ class AIAssistantGUI(QMainWindow):
         
         self.coqui_stream_chunk_size_slider = QSlider(Qt.Horizontal, tts_frame)
         self.coqui_stream_chunk_size_slider.setGeometry(115, 165, 160, 20)
-        self.coqui_stream_chunk_size_slider.setRange(20, 200)
+        self.coqui_stream_chunk_size_slider.setRange(100, 300)
         self.coqui_stream_chunk_size_slider.setSingleStep(5)
         self.coqui_stream_chunk_size_slider.setValue(self.coqui_stream_chunk_size)
         self.coqui_stream_chunk_size_slider.setStyleSheet(slider_style)
@@ -2393,125 +2393,170 @@ class AIAssistantGUI(QMainWindow):
             import traceback
             logging.error(traceback.format_exc())
             return ""
+
     def tts_worker(self):
-        p = None
-        stream = None
-        PLAYBACK_CHUNK = 1024 
+            p      = None
+            stream = None
+            PLAYBACK_CHUNK = 1024
+            SAMPLE_RATE    = 24000
 
-        try:
-            p = pyaudio.PyAudio()
-            output_device_str = self.output_device_dropdown.currentText()
-            output_device_index = int(output_device_str.split(":")[0]) if "No output" not in output_device_str else None
-            
-            stream = p.open(format=pyaudio.paInt16, channels=1, rate=24000, output=True, output_device_index=output_device_index)
-            self.current_tts_stream = stream
-            logging.info(f"TTS Stream initialized.")
+            try:
+                p = pyaudio.PyAudio()
+                output_device_str   = self.output_device_dropdown.currentText()
+                output_device_index = int(output_device_str.split(":")[0]) if "No output" not in output_device_str else None
 
-            while not self.tts_event.is_set():
-                completion_event = None
-                try:
-                    item = self.tts_queue.get(timeout=0.1)
-                    if item is None:
-                        break
-                    text, completion_event = item
+                stream = p.open(
+                    format=pyaudio.paInt16,
+                    channels=1,
+                    rate=SAMPLE_RATE,
+                    output=True,
+                    output_device_index=output_device_index,
+                    frames_per_buffer=PLAYBACK_CHUNK
+                )
+                self.current_tts_stream = stream
+                logging.info(f"TTS Stream initialized.")
 
-                    if self.stop_tts_flag.is_set():
-                        self.stop_tts_flag.clear()
-                        if completion_event: completion_event.set()
-                        continue
-
-                    self.tts_active = True
-                    self.stop_tts_flag.clear()
-                    logging.info(f"Processing TTS...")
-
-                    if not stream.is_active():
-                         stream.start_stream()
-
-                    if self.coqui_model is None:
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
-                        device = self.coqui_device
-                        config_path = os.path.join(COQUI_MODELS_DIR, "config.json")
-                        config = XttsConfig()
-                        config.load_json(config_path)
-                        self.coqui_model = Xtts.init_from_config(config)
-                        self.coqui_model.load_checkpoint(config, checkpoint_dir=COQUI_MODELS_DIR, eval=True)
-                        self.coqui_model.to(device)
-                        if self.speaker_latents is None:
-                            speaker_wav = os.path.join(COQUI_SAMPLES_DIR, self.selected_coqui_sample)
-                            gpt_cond_latent, speaker_embedding = self.coqui_model.get_conditioning_latents(audio_path=[speaker_wav])
-                            self.speaker_latents = (gpt_cond_latent, speaker_embedding)
-                        logging.info("XTTS Model Loaded.")
-                    
-                    # === Critical check: if the voice has changed, we recalculate the latents ===
-                    if self.speaker_latents is None:
-                         speaker_wav = os.path.join(COQUI_SAMPLES_DIR, self.selected_coqui_sample)
-                         gpt_cond_latent, speaker_embedding = self.coqui_model.get_conditioning_latents(audio_path=[speaker_wav])
-                         self.speaker_latents = (gpt_cond_latent, speaker_embedding)
-                         logging.info(f"XTTS Latents Recalculated for: {self.selected_coqui_sample}")
-
-                    text_for_tts = emoji.demojize(text)
-                    audio_chunks = self.coqui_model.inference_stream(
-                        text=text_for_tts,
-                        language=self.whisper_language if self.whisper_language != "auto" else "en",
-                        gpt_cond_latent=self.speaker_latents[0],
-                        speaker_embedding=self.speaker_latents[1],
-                        stream_chunk_size=self.coqui_stream_chunk_size,
-                        temperature=self.coqui_temperature,
-                        enable_text_splitting=True,
-                        speed=self.coqui_speed
-                    )
-
-                    for audio_chunk in audio_chunks:
-                        if self.stop_tts_flag.is_set():
-                            logging.info("TTS interrupted.")
-                            stream.stop_stream()
+                while not self.tts_event.is_set():
+                    completion_event = None
+                    try:
+                        item = self.tts_queue.get(timeout=0.1)
+                        if item is None:
                             break
-                        
-                        audio_data_full = (audio_chunk.squeeze().cpu().numpy() * 32767).astype(np.int16)
-                        
-                        for i in range(0, len(audio_data_full), PLAYBACK_CHUNK):
+                        text, completion_event = item
+
+                        if self.stop_tts_flag.is_set():
+                            self.stop_tts_flag.clear()
+                            if completion_event: completion_event.set()
+                            continue
+
+                        self.tts_active = True
+                        self.stop_tts_flag.clear()
+                        logging.info(f"Processing TTS...")
+
+                        if not stream.is_active():
+                            stream.start_stream()
+
+                        if self.coqui_model is None:
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                            device      = self.coqui_device
+                            config_path = os.path.join(COQUI_MODELS_DIR, "config.json")
+                            config      = XttsConfig()
+                            config.load_json(config_path)
+                            self.coqui_model = Xtts.init_from_config(config)
+                            self.coqui_model.load_checkpoint(config, checkpoint_dir=COQUI_MODELS_DIR, eval=True)
+                            self.coqui_model.to(device)
+                            if self.speaker_latents is None:
+                                speaker_wav                          = os.path.join(COQUI_SAMPLES_DIR, self.selected_coqui_sample)
+                                gpt_cond_latent, speaker_embedding   = self.coqui_model.get_conditioning_latents(audio_path=[speaker_wav])
+                                self.speaker_latents                 = (gpt_cond_latent, speaker_embedding)
+                            logging.info("XTTS Model Loaded.")
+
+                        # === Recalculate latents if voice sample changed ===
+                        if self.speaker_latents is None:
+                            speaker_wav                        = os.path.join(COQUI_SAMPLES_DIR, self.selected_coqui_sample)
+                            gpt_cond_latent, speaker_embedding = self.coqui_model.get_conditioning_latents(audio_path=[speaker_wav])
+                            self.speaker_latents               = (gpt_cond_latent, speaker_embedding)
+                            logging.info(f"XTTS Latents Recalculated for: {self.selected_coqui_sample}")
+
+                        text_for_tts = emoji.demojize(text)
+                        audio_chunks = self.coqui_model.inference_stream(
+                            text=text_for_tts,
+                            language=self.whisper_language if self.whisper_language != "auto" else "en",
+                            gpt_cond_latent=self.speaker_latents[0],
+                            speaker_embedding=self.speaker_latents[1],
+                            stream_chunk_size=self.coqui_stream_chunk_size,
+                            temperature=self.coqui_temperature,
+                            enable_text_splitting=True,
+                            speed=self.coqui_speed
+                        )
+
+                        # === Playback queue — decouples GPU generation from audio playback ===
+                        playback_queue = queue.Queue(maxsize=0)
+                        playback_done  = threading.Event()
+
+                        def playback_thread_func():
+                            while True:
+                                chunk = playback_queue.get()
+
+                                if chunk is None:
+                                    # === Sentinel received — signal main thread to drain hardware buffer ===
+                                    break
+
+                                if self.stop_tts_flag.is_set():
+                                    # === Flush queue and exit immediately ===
+                                    while not playback_queue.empty():
+                                        try: playback_queue.get_nowait()
+                                        except: pass
+                                    break
+
+                                try:
+                                    # === Emit VU BEFORE write — synchronized with actual playback start ===
+                                    audio_float = chunk.astype(np.float32) / 32768.0
+                                    rms         = np.sqrt(np.mean(audio_float ** 2))
+                                    level       = min(int(rms * 100), 14)
+                                    self.vu_output_signal.emit(level)
+
+                                    with self.tts_lock:
+                                        if stream.is_stopped(): stream.start_stream()
+                                        stream.write(chunk.tobytes())
+
+                                except Exception as e:
+                                    logging.error(f"Playback thread error: {e}")
+
+                            playback_done.set()
+
+                        pb_thread = threading.Thread(target=playback_thread_func, daemon=True)
+                        pb_thread.start()
+
+                        # === GPU generates chunks and feeds the playback queue ===
+                        for audio_chunk in audio_chunks:
                             if self.stop_tts_flag.is_set():
-                                stream.stop_stream() 
+                                logging.info("TTS interrupted.")
+                                stream.stop_stream()
                                 break
 
-                            small_chunk = audio_data_full[i:i + PLAYBACK_CHUNK]
-                            volume_factor = self.volume_level / 100.0
-                            small_chunk = (small_chunk * volume_factor).astype(np.int16)
-                            
+                            audio_data_full = (audio_chunk.squeeze().cpu().numpy() * 32767).astype(np.int16)
+                            volume_factor   = self.volume_level / 100.0
+                            audio_data_full = (audio_data_full * volume_factor).astype(np.int16)
+
+                            for i in range(0, len(audio_data_full), PLAYBACK_CHUNK):
+                                if self.stop_tts_flag.is_set():
+                                    break
+                                playback_queue.put(audio_data_full[i:i + PLAYBACK_CHUNK])
+
+                        # === Send sentinel — signals end of generation ===
+                        playback_queue.put(None)
+                        playback_done.wait(timeout=15)
+
+                        # === stop_stream() guarantees PortAudio drains hardware WASAPI buffer ===
+                        # === before signaling completion — most reliable drain method ===
+                        if not self.stop_tts_flag.is_set():
                             with self.tts_lock:
-                                if stream.is_stopped(): stream.start_stream()
-                                stream.write(small_chunk.tobytes())
+                                stream.stop_stream()
+                                stream.start_stream()
 
-                            try:
-                                audio_float = small_chunk.astype(np.float32) / 32768.0
-                                rms = np.sqrt(np.mean(audio_float ** 2))
-                                level = min(int(rms * 100), 14)
-                                self.vu_output_signal.emit(level)
-                            except:
-                                pass
+                    except queue.Empty:
+                        continue
+                    except Exception as e:
+                        logging.error(f"TTS Error: {str(e)}")
+                        self.coqui_model = None
+                    finally:
+                        self.tts_active = False
+                        self.stop_tts_flag.clear()
+                        self.vu_output_signal.emit(0)
+                        if completion_event is not None:
+                            completion_event.set()
 
-                except queue.Empty:
-                    continue
-                except Exception as e:
-                    logging.error(f"TTS Error: {str(e)}")
-                    self.coqui_model = None 
-                finally:
-                    self.tts_active = False
-                    self.stop_tts_flag.clear()  # === Safe to clear here — playback finished or interrupted, queue already empty ===
-                    self.vu_output_signal.emit(0)
-                    if completion_event is not None:
-                        completion_event.set()
-
-        except Exception as e:
-             logging.error(f"Critical TTS Worker Error: {str(e)}")
-        finally:
-            with self.tts_lock:
-                if stream:
-                    stream.stop_stream()
-                    stream.close()
-                if p:
-                    p.terminate()
+            except Exception as e:
+                logging.error(f"Critical TTS Worker Error: {str(e)}")
+            finally:
+                with self.tts_lock:
+                    if stream:
+                        stream.stop_stream()
+                        stream.close()
+                    if p:
+                        p.terminate()
 
     def load_mics(self):
         logging.info("Loading audio input devices")
@@ -3088,58 +3133,32 @@ class AIAssistantGUI(QMainWindow):
     
     def build_mcp_follow_up_prompt(self, original_query, tool_results):
         """
-        Builds the SPECIAL prompt for AI after executing tools
-        This prompt contains CLEAR INSTRUCTIONS on what to do next
+        Builds the SPECIAL prompt for AI after executing tools.
+        Template is loaded from /MCP/Tool Chain Rules.md
         """
-        
+
         # === Format results ===
         results_text = ""
         for item in tool_results:
             tool_name = item['tool']
-            result = item['result']  
-          
+            result = item['result']
             if result.get("ok"):
                 results_text += f"\n✅ {tool_name}:\n{json.dumps(result.get('data', result), indent=2)}\n"
             else:
                 results_text += f"\n❌ {tool_name} FAILED:\n{result.get('error', 'Unknown error')}\n"
-        
-        # === SPECIAL PROMPT WITH CLEAR TOOL USE INSTRUCTION ===
-        prompt = f"""TOOL EXECUTION RESULTS
-{'='*60}
 
-Original user query: "{original_query}"
+        # === Load template from external file ===
+        rules_path = os.path.join(BASE_DIR, "MCP", "Tool Chain Rules.md")
+        template = open(rules_path, "r", encoding="utf-8").read()
+        template = template.replace("\\_", "_")  # === Markdown File auto-escapes underscores ===
 
-Tool execution results:
-{results_text}
+        # === Inject dynamic values ===
+        prompt = template.format(
+            separator="=" * 60,
+            original_query=original_query,
+            results_text=results_text
+        )
 
-{'='*60}
-INSTRUCTIONS:
-{'='*60}
-
-Based on these results, you must decide:
-
-1. IF you need MORE information:
-   → Call another tool (e.g., web_fetch if you just got URLs from web_search)
-   → Respond with JSON tool call
-
-2. IF you have ENOUGH information:
-   → Extract the relevant answer from the results
-   → Provide a clear, natural language response to the user
-   → DO NOT include JSON in your response
-
-EXAMPLES:
-
-Example 1 - Need more info:
-Results: web_search returned URLs about weather
-Your response: {{"id": "xyz", "tool": "web_fetch", "arguments": {{"url": "first_url_here"}}}}
-
-Example 2 - Have enough info:
-Results: web_fetch returned page content with "Temperature: 15°C, Cloudy"
-Your response: "The temperature in Bucharest is 15°C and it's cloudy."
-
-NOW, based on the tool results above, what is your response?
-"""
-        
         return prompt
 
     def execute_mcp_tool(self, tool_call):
