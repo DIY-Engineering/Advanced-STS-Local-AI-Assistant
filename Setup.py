@@ -9,7 +9,7 @@ This script handles the complete setup in 3 stages:
 
   STAGE 2 — Python Dependencies
     Installs all required packages from the embedded
-    requirements list. PyTorch with CUDA 12.1 is handled
+    requirements list. PyTorch with CUDA 12.8 is handled
     separately before the rest of the packages.
 
   STAGE 3 — Model Downloads
@@ -20,14 +20,24 @@ This script handles the complete setup in 3 stages:
       - Coqui XTTS-v2    (TTS Model + tos_agreed.txt)
 
 Usage:
-    python setup.py                         (full setup — all stages)
+    python setup.py                         (full setup — CUDA 12.8, all GPU architectures)
+    python setup.py --cpu                   (install PyTorch CPU version — no GPU)
     python setup.py --skip-deps             (skip dependency installation)
     python setup.py --skip-models           (skip model downloads)
     python setup.py --skip-whisper          (skip Faster-Whisper models)
     python setup.py --only-coqui            (download only Coqui XTTS-v2)
     python setup.py --only-whisper          (download only Faster-Whisper)
-    python setup.py --cpu                   (install PyTorch CPU version instead of CUDA)
     python setup.py --whisper-models small medium large-v3  (specific Whisper models only)
+
+GPU Compatibility:
+    Pascal  (GTX 10xx)      → python setup.py
+    Turing  (RTX 20xx)      → python setup.py
+    Ampere  (RTX 30xx)      → python setup.py
+    Ada     (RTX 40xx)      → python setup.py
+    Blackwell (RTX 50xx)    → python setup.py
+    No GPU / CPU only       → python setup.py --cpu
+
+    Note: CUDA 12.8 is backward compatible with all architectures above.
 """
 
 import os
@@ -69,6 +79,7 @@ FOLDER_STRUCTURE = [
     "Debug Logs",
     "Dependencies",
     "Graphics",
+    "MCP",
     "MCP Server",
     os.path.join("MCP Server", "Graphics"),
     os.path.join("MCP Server", "Plugins"),
@@ -133,17 +144,19 @@ MINILM_FOLDERS = ["1_Pooling"]
 # PyTorch — installed separately due to custom CUDA index URL
 # ============================================================
 
+# === CUDA 12.8 — compatible with Pascal, Turing, Ampere, Ada, Blackwell ===
 PYTORCH_CUDA_PACKAGES = [
-    "torch==2.5.1+cu121",
-    "torchaudio==2.5.1+cu121",
-    "torchvision==0.20.1+cu121",
+    "torch==2.7.0+cu128",
+    "torchaudio==2.7.0+cu128",
+    "torchvision==0.22.0+cu128",
 ]
-PYTORCH_CUDA_INDEX = "https://download.pytorch.org/whl/cu121"
+PYTORCH_CUDA_INDEX = "https://download.pytorch.org/whl/cu128"
 
+# === CPU only — no GPU ===
 PYTORCH_CPU_PACKAGES = [
-    "torch==2.0.1",
-    "torchaudio==2.0.2",
-    "torchvision==0.15.2",
+    "torch==2.7.0",
+    "torchaudio==2.7.0",
+    "torchvision==0.22.0",
 ]
 PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
 
@@ -398,6 +411,11 @@ def install_dependencies(use_cpu=False):
     """
     Installs all Python dependencies.
     PyTorch is installed first with the appropriate index URL.
+
+    Modes:
+        default → CUDA 12.8 (all GPU architectures: Pascal to Blackwell)
+        --cpu   → CPU only, no CUDA
+
     Returns True if all packages installed successfully.
     """
     print_header("STAGE 2 — Installing Python Dependencies")
@@ -409,11 +427,11 @@ def install_dependencies(use_cpu=False):
 
     # Step 2 — Install PyTorch
     if use_cpu:
-        log.info(f"\n🔥 Installing PyTorch (CPU version)...")
+        log.info(f"\n🔥 Installing PyTorch 2.7.0 (CPU only — no CUDA)...")
         torch_packages = PYTORCH_CPU_PACKAGES
         torch_index    = PYTORCH_CPU_INDEX
     else:
-        log.info(f"\n🔥 Installing PyTorch (CUDA 12.1)...")
+        log.info(f"\n🔥 Installing PyTorch 2.7.0 (CUDA 12.8 — Pascal to Blackwell)...")
         torch_packages = PYTORCH_CUDA_PACKAGES
         torch_index    = PYTORCH_CUDA_INDEX
 
@@ -610,6 +628,13 @@ def main():
     print("  Advanced STS Local AI Assistant — Full Setup")
     print("=" * 60)
     print(f"  Root folder: {BASE_DIR}")
+    print("=" * 60)
+
+    # === GPU mode display ===
+    if args.cpu:
+        print("  🔵 GPU Mode : CPU only (no CUDA)")
+    else:
+        print("  🟡 GPU Mode : CUDA 12.8 (Pascal to Blackwell — GTX 10xx to RTX 50xx)")
     print("=" * 60)
 
     results = {}
