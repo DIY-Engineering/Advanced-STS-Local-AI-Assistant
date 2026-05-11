@@ -50,7 +50,7 @@ During installation, select ```Desktop development with C++```.
 
 Step 3 - Install NVIDIA CUDA 12.8 and cuDNN 9.12
 
-CUDA 12.8: ```https://developer.nvidia.com/cuda-12-1-0-download-archive```
+CUDA 12.8: ```https://developer.nvidia.com/cuda-12-8-0-download-archive```
 cuDNN 9.12: ```https://developer.nvidia.com/cudnn``` (requires free NVIDIA account)
 
  Step 4 - Install LM Studio
