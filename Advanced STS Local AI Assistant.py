@@ -90,7 +90,7 @@ _created = create_folder_structure()
 
 # ====== LOGGING CONFIG ======
 MCP_SERVER_DIR  = os.path.join(BASE_DIR, "MCP Server")
-MCP_SERVER_FILE = os.path.join(MCP_SERVER_DIR, "MCP Server.py")
+MCP_SERVER_FILE = os.path.join(MCP_SERVER_DIR, "MCP Server 0.1.1 Beta.py")
 LOG_DIR = os.path.join(BASE_DIR, "Debug Logs")
 
 class Utf8StreamHandler(logging.StreamHandler):
@@ -367,7 +367,7 @@ class AIAssistantGUI(QMainWindow):
         super().__init__()
         
         # ====== INITIALIZE GUI ======
-        self.setWindowTitle("= Advanced STS Local AI Assistant 0.1.2 Beta =")
+        self.setWindowTitle("= Advanced STS Local AI Assistant 0.1.3 Beta =")
         self.setGeometry(0, 0, 1326, 663)
         self.setFixedSize(1326, 663)
         
@@ -2447,9 +2447,9 @@ class AIAssistantGUI(QMainWindow):
                             self.coqui_model.load_checkpoint(config, checkpoint_dir=COQUI_MODELS_DIR, eval=True)
                             self.coqui_model.to(device)
                             if self.speaker_latents is None:
-                                speaker_wav                          = os.path.join(COQUI_SAMPLES_DIR, self.selected_coqui_sample)
-                                gpt_cond_latent, speaker_embedding   = self.coqui_model.get_conditioning_latents(audio_path=[speaker_wav])
-                                self.speaker_latents                 = (gpt_cond_latent, speaker_embedding)
+                                speaker_wav                        = os.path.join(COQUI_SAMPLES_DIR, self.selected_coqui_sample)
+                                gpt_cond_latent, speaker_embedding = self.coqui_model.get_conditioning_latents(audio_path=[speaker_wav])
+                                self.speaker_latents               = (gpt_cond_latent, speaker_embedding)
                             logging.info("XTTS Model Loaded.")
 
                         # === Recalculate latents if voice sample changed ===
@@ -2476,11 +2476,19 @@ class AIAssistantGUI(QMainWindow):
                         playback_done  = threading.Event()
 
                         def playback_thread_func():
+                            total_samples = 0
+                            start_time    = None
+
                             while True:
                                 chunk = playback_queue.get()
 
                                 if chunk is None:
-                                    # === Sentinel received — signal main thread to drain hardware buffer ===
+                                    # === Calculate exact remaining play time — deterministic, no fixed sleeps ===
+                                    if start_time is not None:
+                                        elapsed   = time.time() - start_time
+                                        remaining = (total_samples / SAMPLE_RATE) - elapsed + 0.05
+                                        if remaining > 0:
+                                            time.sleep(remaining)
                                     break
 
                                 if self.stop_tts_flag.is_set():
@@ -2500,6 +2508,11 @@ class AIAssistantGUI(QMainWindow):
                                     with self.tts_lock:
                                         if stream.is_stopped(): stream.start_stream()
                                         stream.write(chunk.tobytes())
+
+                                    # === Track exact audio duration written ===
+                                    if start_time is None:
+                                        start_time = time.time()
+                                    total_samples += len(chunk)
 
                                 except Exception as e:
                                     logging.error(f"Playback thread error: {e}")
@@ -2527,14 +2540,8 @@ class AIAssistantGUI(QMainWindow):
 
                         # === Send sentinel — signals end of generation ===
                         playback_queue.put(None)
+                        # === Wait for playback thread to finish — drain handled inside playback thread ===
                         playback_done.wait(timeout=15)
-
-                        # === stop_stream() guarantees PortAudio drains hardware WASAPI buffer ===
-                        # === before signaling completion — most reliable drain method ===
-                        if not self.stop_tts_flag.is_set():
-                            with self.tts_lock:
-                                stream.stop_stream()
-                                stream.start_stream()
 
                     except queue.Empty:
                         continue
@@ -2545,6 +2552,7 @@ class AIAssistantGUI(QMainWindow):
                         self.tts_active = False
                         self.stop_tts_flag.clear()
                         self.vu_output_signal.emit(0)
+                        # === completion_event.set() called AFTER playback_done — audio fully finished ===
                         if completion_event is not None:
                             completion_event.set()
 
@@ -2978,7 +2986,7 @@ class AIAssistantGUI(QMainWindow):
             init_result = self.mcp_request_with_retry("initialize", {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "clientInfo": {"name": "Advanced-STS-Local-AI-Assistant", "version": "0.1.2 Beta"}
+                "clientInfo": {"name": "Advanced-STS-Local-AI-Assistant", "version": "0.1.3 Beta"}
             })
             
             if not init_result:
@@ -3347,7 +3355,7 @@ class AIAssistantGUI(QMainWindow):
         dialog.move(x, y)
 
         # === Version ===
-        version_label = QLabel("Version: 0.1.2 Beta", dialog)
+        version_label = QLabel("Version: 0.1.3 Beta", dialog)
         version_label.setGeometry(140, 2, 200, 20)
         version_label.setStyleSheet("color: #FFFF96; font-weight: bold; font-size: 10pt;")
 
