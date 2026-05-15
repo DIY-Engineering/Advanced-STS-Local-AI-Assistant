@@ -1754,66 +1754,76 @@ class AIAssistantGUI(QMainWindow):
             audio_bytes = b''.join(frames)
             audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
             transcription = self.transcribe_audio(audio_array)
-            if transcription:
-                logging.info(f"Transcription: {transcription}")
-                
-                should_process = False
-                prompt_to_process = ""
-                
-                if not self.wake_word_enabled:
-                    should_process = True
-                    prompt_to_process = transcription
-                    self.append_log("User", transcription)
-                else:
-                    wake_word_str = self.wake_word.strip().lower()
-                    transcription_lower = transcription.lower()
-                    if wake_word_str and wake_word_str in transcription_lower:
-                         wake_index = transcription_lower.index(wake_word_str)
-                         prompt_to_process = transcription[wake_index:]
-                         logging.info(f"Wake word detected. Processing: {prompt_to_process}")
-                         self.append_log("User", prompt_to_process)
-                         should_process = True
-                    else:
-                        logging.info(f"Wake word not detected.")
 
-                if should_process:
-                    # === AI query with general prompt ===
-                    initial_response = self.query_lm_studio(prompt_to_process)
-                    
-                    if not initial_response:
-                        return  # === LM Studio error, stop here ===
-                    
-                    # ====== FORK: Simple Chat vs. MCP workflow ======
-                    tool_calls = self.parse_tool_calls(initial_response)
-                    
-                    if tool_calls and self.use_mcp_server:
-                        # === MCP CHAIN EXECUTOR ===
-                        logging.info("🔗 MCP workflow detected")
-                        final_response_text = self.mcp_chain_executor(prompt_to_process, initial_response)
-                    else:
-                        # === SIMPLE CHAT ===
-                        logging.info("💬 Simple chat mode")
-                        final_response_text = self.extract_text_response(initial_response)
-                    
-                    # === Log & TTS ===
-                    if final_response_text:
-                        logging.info(f"Assistant: {final_response_text}")
-                        self.append_log("Assistant", final_response_text)
-                        
-                        completion_event = threading.Event()
-                        self.tts_queue.put((final_response_text, completion_event))
-                        
-                        if not self.real_talk_enabled:
-                            completion_event.wait()
+            if not transcription:
+                return
+
+            logging.info(f"Transcription: {transcription}")
+
+            should_process    = False
+            prompt_to_process = ""
+
+            if not self.wake_word_enabled:
+                should_process    = True
+                prompt_to_process = transcription
+                self.append_log("User", transcription)
+            else:
+                wake_word_str       = self.wake_word.strip().lower()
+                transcription_lower = transcription.lower()
+                if wake_word_str and wake_word_str in transcription_lower:
+                    wake_index        = transcription_lower.index(wake_word_str)
+                    prompt_to_process = transcription[wake_index:]
+                    logging.info(f"Wake word detected: {prompt_to_process}")
+                    self.append_log("User", prompt_to_process)
+                    should_process = True
+                else:
+                    logging.info("Wake word not detected.")
+
+            if should_process:
+                initial_response = self.query_lm_studio(prompt_to_process)
+                if not initial_response:
+                    return
+
+                # === FORK: Simple Chat vs MCP workflow ===
+                tool_calls = self.parse_tool_calls(initial_response)
+
+                if tool_calls and self.use_mcp_server:
+                    logging.info("🔗 MCP workflow detected")
+                    final_response_text = self.mcp_chain_executor(prompt_to_process, initial_response)
+                else:
+                    logging.info("💬 Simple chat mode")
+                    final_response_text = self.extract_text_response(initial_response)
+
+                if final_response_text:
+                    logging.info(f"Assistant: {final_response_text}")
+                    self.append_log("Assistant", final_response_text)
+
+                    completion_event = threading.Event()
+                    self.tts_queue.put((final_response_text, completion_event))
+
+                    if not self.real_talk_enabled:
+                        # === Wait for confirmed TTS completion from playback thread ===
+                        completed = completion_event.wait(timeout=50)
+                        if not completed:
+                            logging.warning("TTS completion timeout!")
+
+                        # === Safety margin for hardware audio subsystem ===
+                        time.sleep(0.18)
+
+                        # === Resume mic only after TTS fully finished ===
+                        if self.recording_paused:
+                            self.recording_paused = False
+                            self.resume_event.set()
+                            logging.info("Microphone resumed after full TTS playback.")
 
         except Exception as e:
-            logging.error(f"Error processing audio segment: {str(e)}")
+            logging.error(f"Error in process_audio_segment: {str(e)}")
         finally:
-            # === Resume microphone listening for Standard Mode ===
+            # === Safety fallback — mic resumes even if an error occurred ===
             if not self.real_talk_enabled and self.recording_paused:
                 self.recording_paused = False
                 self.resume_event.set()
-                logging.info("Resuming recording (Standard Mode Process Finished).")
+                logging.info("Microphone resumed (safety fallback).")
 
     def extract_json_blocks(self, text: str):
         blocks = []
@@ -2414,7 +2424,7 @@ class AIAssistantGUI(QMainWindow):
                     frames_per_buffer=PLAYBACK_CHUNK
                 )
                 self.current_tts_stream = stream
-                logging.info(f"TTS Stream initialized.")
+                logging.info("TTS Stream initialized.")
 
                 while not self.tts_event.is_set():
                     completion_event = None
@@ -2431,7 +2441,7 @@ class AIAssistantGUI(QMainWindow):
 
                         self.tts_active = True
                         self.stop_tts_flag.clear()
-                        logging.info(f"Processing TTS...")
+                        logging.info(f"Processing TTS: {text[:70]}...")
 
                         if not stream.is_active():
                             stream.start_stream()
@@ -2439,17 +2449,12 @@ class AIAssistantGUI(QMainWindow):
                         if self.coqui_model is None:
                             if torch.cuda.is_available():
                                 torch.cuda.empty_cache()
-                            device      = self.coqui_device
-                            config_path = os.path.join(COQUI_MODELS_DIR, "config.json")
-                            config      = XttsConfig()
-                            config.load_json(config_path)
+                            device = self.coqui_device
+                            config = XttsConfig()
+                            config.load_json(os.path.join(COQUI_MODELS_DIR, "config.json"))
                             self.coqui_model = Xtts.init_from_config(config)
                             self.coqui_model.load_checkpoint(config, checkpoint_dir=COQUI_MODELS_DIR, eval=True)
                             self.coqui_model.to(device)
-                            if self.speaker_latents is None:
-                                speaker_wav                        = os.path.join(COQUI_SAMPLES_DIR, self.selected_coqui_sample)
-                                gpt_cond_latent, speaker_embedding = self.coqui_model.get_conditioning_latents(audio_path=[speaker_wav])
-                                self.speaker_latents               = (gpt_cond_latent, speaker_embedding)
                             logging.info("XTTS Model Loaded.")
 
                         # === Recalculate latents if voice sample changed ===
@@ -2476,30 +2481,21 @@ class AIAssistantGUI(QMainWindow):
                         playback_done  = threading.Event()
 
                         def playback_thread_func():
-                            total_samples = 0
-                            start_time    = None
+                            try:
+                                while True:
+                                    chunk = playback_queue.get()
 
-                            while True:
-                                chunk = playback_queue.get()
+                                    if chunk is None:  # === Sentinel — end of audio ===
+                                        break
 
-                                if chunk is None:
-                                    # === Calculate exact remaining play time — deterministic, no fixed sleeps ===
-                                    if start_time is not None:
-                                        elapsed   = time.time() - start_time
-                                        remaining = (total_samples / SAMPLE_RATE) - elapsed + 0.05
-                                        if remaining > 0:
-                                            time.sleep(remaining)
-                                    break
+                                    if self.stop_tts_flag.is_set():
+                                        # === Flush remaining chunks and exit immediately ===
+                                        while not playback_queue.empty():
+                                            try: playback_queue.get_nowait()
+                                            except: pass
+                                        break
 
-                                if self.stop_tts_flag.is_set():
-                                    # === Flush queue and exit immediately ===
-                                    while not playback_queue.empty():
-                                        try: playback_queue.get_nowait()
-                                        except: pass
-                                    break
-
-                                try:
-                                    # === Emit VU BEFORE write — synchronized with actual playback start ===
+                                    # === Emit VU BEFORE write — synchronized with actual playback ===
                                     audio_float = chunk.astype(np.float32) / 32768.0
                                     rms         = np.sqrt(np.mean(audio_float ** 2))
                                     level       = min(int(rms * 100), 14)
@@ -2509,15 +2505,11 @@ class AIAssistantGUI(QMainWindow):
                                         if stream.is_stopped(): stream.start_stream()
                                         stream.write(chunk.tobytes())
 
-                                    # === Track exact audio duration written ===
-                                    if start_time is None:
-                                        start_time = time.time()
-                                    total_samples += len(chunk)
-
-                                except Exception as e:
-                                    logging.error(f"Playback thread error: {e}")
-
-                            playback_done.set()
+                            except Exception as e:
+                                logging.error(f"Playback thread error: {e}")
+                            finally:
+                                # === Guaranteed — playback_done always set even on exception ===
+                                playback_done.set()
 
                         pb_thread = threading.Thread(target=playback_thread_func, daemon=True)
                         pb_thread.start()
@@ -2526,12 +2518,10 @@ class AIAssistantGUI(QMainWindow):
                         for audio_chunk in audio_chunks:
                             if self.stop_tts_flag.is_set():
                                 logging.info("TTS interrupted.")
-                                stream.stop_stream()
                                 break
 
                             audio_data_full = (audio_chunk.squeeze().cpu().numpy() * 32767).astype(np.int16)
-                            volume_factor   = self.volume_level / 100.0
-                            audio_data_full = (audio_data_full * volume_factor).astype(np.int16)
+                            audio_data_full = (audio_data_full * (self.volume_level / 100.0)).astype(np.int16)
 
                             for i in range(0, len(audio_data_full), PLAYBACK_CHUNK):
                                 if self.stop_tts_flag.is_set():
@@ -2540,29 +2530,45 @@ class AIAssistantGUI(QMainWindow):
 
                         # === Send sentinel — signals end of generation ===
                         playback_queue.put(None)
-                        # === Wait for playback thread to finish — drain handled inside playback thread ===
-                        playback_done.wait(timeout=15)
+
+                        # === Wait for playback thread to fully finish ===
+                        if not playback_done.wait(timeout=45):
+                            logging.warning("Playback timeout!")
+
+                        # === Final hardware buffer drain ===
+                        with self.tts_lock:
+                            if stream and stream.is_active():
+                                try:
+                                    stream.stop_stream()
+                                    time.sleep(0.1)  # === Small hardware drain margin ===
+                                    stream.start_stream()
+                                except:
+                                    pass
 
                     except queue.Empty:
                         continue
                     except Exception as e:
                         logging.error(f"TTS Error: {str(e)}")
-                        self.coqui_model = None
+                        self.coqui_model = None  # === Force model reload on next request ===
                     finally:
                         self.tts_active = False
                         self.stop_tts_flag.clear()
                         self.vu_output_signal.emit(0)
-                        # === completion_event.set() called AFTER playback_done — audio fully finished ===
+                        # === completion_event.set() called AFTER full hardware drain ===
                         if completion_event is not None:
                             completion_event.set()
+                            logging.info("TTS completion signaled — audio fully played.")
 
             except Exception as e:
                 logging.error(f"Critical TTS Worker Error: {str(e)}")
             finally:
                 with self.tts_lock:
                     if stream:
-                        stream.stop_stream()
-                        stream.close()
+                        try:
+                            stream.stop_stream()
+                            stream.close()
+                        except:
+                            pass
                     if p:
                         p.terminate()
 
