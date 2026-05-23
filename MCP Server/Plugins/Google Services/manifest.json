@@ -1,6 +1,6 @@
 {
   "name": "google_services",
-  "version": "0.1.1 Beta",
+  "version": "0.1.2 Beta",
   "display_name": "Google Services",
   "description": "Complete Google integration: Search, Gmail, Calendar, YouTube, Web Fetch",
   "author": "Nechifor Marian",
