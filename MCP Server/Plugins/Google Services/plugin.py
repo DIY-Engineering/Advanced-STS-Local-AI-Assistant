@@ -1,6 +1,6 @@
 """
 Google Services Plugin - SIMPLIFIED VERSION
-User-friendly: Only OAuth authentication required!
+User-friendly: OAuth authentication required for Mail Calendar and Agenda
 API Keys are hardcoded (admin will replace them)
 """
 
@@ -29,8 +29,8 @@ except ImportError:
 # In Your Google Cloud Console Under Your Project Name Activate: "Custom Search API", "Gmail API", "People API",  "Google Calendar API", "YouTube Data API v3"
 # You have to create a custom search engine and also create an OAuth authentication file in .JSON format
 # Admin: Replace these with your actual Google API credentials
-GOOGLE_API_KEY = "dummy"
-GOOGLE_CSE_ID = "dummy"
+GOOGLE_API_KEY = "0000" # To be replaced with REAL Key obtained from Google cloud console
+GOOGLE_CSE_ID = "0000" # To be replaced with CSE-ID obtained from Google cloud console
 
 
 class GoogleServicesPlugin(BasePlugin):
@@ -289,6 +289,7 @@ class GoogleServicesPlugin(BasePlugin):
     
     def get_tools(self):
         """Return all tools"""
+        # === No auth required ===
         tools = [
             {
                 "name": "google_search",
@@ -296,7 +297,7 @@ class GoogleServicesPlugin(BasePlugin):
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string"},
+                        "query":       {"type": "string"},
                         "num_results": {"type": "integer", "default": 5}
                     },
                     "required": ["query"]
@@ -307,15 +308,34 @@ class GoogleServicesPlugin(BasePlugin):
                 "description": "Fetch and extract text from URL",
                 "inputSchema": {
                     "type": "object",
+                    "properties": {"url": {"type": "string"}},
+                    "required": ["url"]
+                }
+            },
+            {
+                "name": "youtube_search",
+                "description": "Search YouTube videos",
+                "inputSchema": {
+                    "type": "object",
                     "properties": {
-                        "url": {"type": "string"}
+                        "query":       {"type": "string"},
+                        "max_results": {"type": "integer", "default": 5}
                     },
+                    "required": ["query"]
+                }
+            },
+            {
+                "name": "youtube_play",
+                "description": "Open YouTube video in browser",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"url": {"type": "string"}},
                     "required": ["url"]
                 }
             }
         ]
-        
-        # Add OAuth tools if authenticated
+
+        # === OAuth required tools — only added if authenticated ===
         if self.get_config("authenticated", False):
             tools.extend([
                 {
@@ -324,9 +344,9 @@ class GoogleServicesPlugin(BasePlugin):
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "to": {"type": "string"},
-                            "subject": {"type": "string"},
-                            "body": {"type": "string"},
+                            "to":        {"type": "string"},
+                            "subject":   {"type": "string"},
+                            "body":      {"type": "string"},
                             "body_html": {"type": "string"}
                         },
                         "required": ["to", "subject", "body"]
@@ -339,7 +359,7 @@ class GoogleServicesPlugin(BasePlugin):
                         "type": "object",
                         "properties": {
                             "max_results": {"type": "integer", "default": 10},
-                            "query": {"type": "string", "default": ""}
+                            "query":       {"type": "string",  "default": ""}
                         }
                     }
                 },
@@ -359,11 +379,11 @@ class GoogleServicesPlugin(BasePlugin):
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "summary": {"type": "string"},
-                            "start_time": {"type": "string"},
-                            "end_time": {"type": "string"},
+                            "summary":     {"type": "string"},
+                            "start_time":  {"type": "string"},
+                            "end_time":    {"type": "string"},
                             "description": {"type": "string"},
-                            "location": {"type": "string"}
+                            "location":    {"type": "string"}
                         },
                         "required": ["summary", "start_time", "end_time"]
                     }
@@ -378,32 +398,9 @@ class GoogleServicesPlugin(BasePlugin):
                         },
                         "required": ["event_id"]
                     }
-                },
-                {
-                    "name": "youtube_search",
-                    "description": "Search YouTube videos",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "query": {"type": "string"},
-                            "max_results": {"type": "integer", "default": 5}
-                        },
-                        "required": ["query"]
-                    }
-                },
-                {
-                    "name": "youtube_play",
-                    "description": "Open YouTube video",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "url": {"type": "string"}
-                        },
-                        "required": ["url"]
-                    }
                 }
             ])
-        
+
         return tools
     
     def get_prompt_section(self):
@@ -423,6 +420,19 @@ User: "What's on this page: https://example.com"
 → {"id": "call_2", "tool": "web_fetch", "arguments": {"url": "https://example.com"}}
 """
         
+        prompt += """
+=== YOUTUBE (No authentication required) ===
+- youtube_search: Search YouTube videos (arguments: query, max_results)
+- youtube_play: Open YouTube video in browser (arguments: url)
+
+YOUTUBE EXAMPLES:
+User: "Find cat videos on YouTube"
+→ {"id": "call_1", "tool": "youtube_search", "arguments": {"query": "funny cats", "max_results": 5}}
+
+User: "Play the first video"
+→ {"id": "call_2", "tool": "youtube_play", "arguments": {"url": "https://www.youtube.com/watch?v=abc123"}}
+"""
+
         if is_authenticated:
             prompt += """
 === GMAIL (Authenticated) ===
@@ -447,17 +457,6 @@ User: "Show my calendar for today"
 
 User: "Schedule a meeting tomorrow at 2 PM"
 → {"id": "call_2", "tool": "calendar_create", "arguments": {"summary": "Meeting", "start_time": "2024-02-07T14:00:00", "end_time": "2024-02-07T15:00:00"}}
-
-=== YOUTUBE (Authenticated) ===
-- youtube_search: Search YouTube videos (arguments: query, max_results)
-- youtube_play: Open YouTube video in browser (arguments: video_id)
-
-YOUTUBE EXAMPLES:
-User: "Find cat videos on YouTube"
-→ {"id": "call_1", "tool": "youtube_search", "arguments": {"query": "funny cats", "max_results": 5}}
-
-User: "Play the first video"
-→ {"id": "call_2", "tool": "youtube_play", "arguments": {"video_id": "abc123"}}
 """
         
         return prompt
@@ -686,31 +685,34 @@ User: "Play the first video"
     # ============ YOUTUBE ============
     
     def _youtube_search(self, args):
-        """Search YouTube"""
-        if not self.youtube_service:
-            return {"content": [{"type": "text", "text": "YouTube not authenticated"}], "isError": True}
-        
+        """Search YouTube using API key — no OAuth required"""
         try:
-            result = self.youtube_service.search().list(
-                q=args.get("query"), part='snippet',
-                maxResults=args.get("max_results", 5), type='video'
-            ).execute()
-            
+            params = {
+                "key":        GOOGLE_API_KEY,
+                "q":          args.get("query"),
+                "part":       "snippet",
+                "type":       "video",
+                "maxResults": args.get("max_results", 5)
+            }
+            response = requests.get("https://www.googleapis.com/youtube/v3/search", params=params)
+            response.raise_for_status()
+            data = response.json()
+
             videos = []
-            for item in result.get('items', []):
-                video_id = item['id']['videoId']
+            for item in data.get("items", []):
+                video_id = item["id"]["videoId"]
                 videos.append({
-                    'title': item['snippet']['title'],
-                    'url': f"https://www.youtube.com/watch?v={video_id}",
-                    'description': item['snippet']['description'],
-                    'channel': item['snippet']['channelTitle'],
-                    'published': item['snippet']['publishedAt']
+                    "title":       item["snippet"]["title"],
+                    "url":         f"https://www.youtube.com/watch?v={video_id}",
+                    "description": item["snippet"]["description"],
+                    "channel":     item["snippet"]["channelTitle"],
+                    "published":   item["snippet"]["publishedAt"]
                 })
-            
+
             return {"content": [{"type": "text", "text": json.dumps(videos, indent=2)}]}
-            
+
         except Exception as e:
-            return {"content": [{"type": "text", "text": f"❌ Search failed: {str(e)}"}], "isError": True}
+            return {"content": [{"type": "text", "text": f"❌ YouTube search failed: {str(e)}"}], "isError": True}
     
     def _youtube_play(self, args):
         """Open YouTube video"""
@@ -808,19 +810,32 @@ User: "Play the first video"
             return False, str(e)
     
     def _load_oauth_services(self):
-        """Load OAuth services from token"""
+        """Load OAuth services from token — with auto-refresh if expired"""
         if not os.path.exists(self.token_file):
             return
-        
+
         try:
             creds = Credentials.from_authorized_user_file(self.token_file, self.GOOGLE_SCOPES)
-            
+
+            # === Auto-refresh token if expired but refresh_token available ===
+            if creds and not creds.valid:
+                if creds.expired and creds.refresh_token:
+                    self.log("Token expired — refreshing...", "info")
+                    creds.refresh(Request())
+                    # === Save refreshed token ===
+                    with open(self.token_file, 'w') as token:
+                        token.write(creds.to_json())
+                    self.log("Token refreshed and saved.", "info")
+
             if creds and creds.valid:
-                self.gmail_service = build('gmail', 'v1', credentials=creds)
+                self.gmail_service    = build('gmail',    'v1', credentials=creds)
                 self.calendar_service = build('calendar', 'v3', credentials=creds)
-                self.youtube_service = build('youtube', 'v3', credentials=creds)
-                self.people_service = build('people', 'v1', credentials=creds)
+                self.youtube_service  = build('youtube',  'v3', credentials=creds)
+                self.people_service   = build('people',   'v1', credentials=creds)
                 self.creds = creds
-                self.log("OAuth services loaded", "info")
+                self.log("OAuth services loaded successfully.", "info")
+            else:
+                self.log("Token invalid and cannot be refreshed — re-authentication required.", "warning")
+
         except Exception as e:
             self.log(f"Failed to load OAuth: {e}", "warning")
