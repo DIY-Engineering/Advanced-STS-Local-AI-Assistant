@@ -17,7 +17,7 @@ IF you need to to play a youtube video:
    → Then use "youtube_play" to open that video in the default web browser
 
 IF you you need to search for weather:
-   → Search on Google for the weather on the location specified by the user
+   → Use "google_search" with the quiry provided by user
    → Fetch the first google result and extract the relevant information (Temperature in °C , wind speed, UV Index, Visibility & Atmospheric Conditions)
 
 IF you need to make web search:
