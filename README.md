@@ -19,7 +19,7 @@ Key Features :
 - 🖥️ GUI - PyQt5 for a clean and modern desktop interface ```Control Pannel Style```
 
 
-Minimum System Requirements :
+System Requirements :
 
 | Component |          Requirement        |
 |-----------|-----------------------------|
@@ -27,7 +27,7 @@ Minimum System Requirements :
 | Python    | 3.12.6 X64                  |    
 | GPU       | GTX 1060 6GB or better      |
 | CUDA      | 12.8                        |
-| cuDNN     | 9.12                       |
+| cuDNN     | 9.12                        |
 | RAM       | 16GB or more                |
 | Storage   | 20GB Free space             |
 | LLM Server| LM Studio 0.4.4             |
