@@ -367,7 +367,7 @@ class AIAssistantGUI(QMainWindow):
         super().__init__()
         
         # ====== INITIALIZE GUI ======
-        self.setWindowTitle("= Advanced STS Local AI Assistant 0.1.3 Beta =")
+        self.setWindowTitle("= Advanced STS Local AI Assistant 0.1.4 Beta =")
         self.setGeometry(0, 0, 1326, 663)
         self.setFixedSize(1326, 663)
         
@@ -1841,14 +1841,16 @@ class AIAssistantGUI(QMainWindow):
                     blocks.append(text[start:i+1])
         return blocks
 
-    def sanitize_json_string(self, s: str):
+    def sanitize_json_string(self, s: str) -> str:
+        # === Eliminate markdown blocks ===
         s = re.sub(r"```json", "", s, flags=re.IGNORECASE)
         s = re.sub(r"```", "", s)
-        s = re.sub(r"//.*", "", s)
+    
+        # === Eliminate trailing commas ===
         s = re.sub(r",\s*}", "}", s)
         s = re.sub(r",\s*\]", "]", s)
-        s = s.replace('\\"', '"')
-        s = re.sub(r'(\w+):\s', r'"\1": ', s)
+    
+        # === Return result cleaned of unnecesary spaces ===
         return s.strip()
 
     def validate_and_parse_json(self, block: str):
@@ -2992,7 +2994,7 @@ class AIAssistantGUI(QMainWindow):
             init_result = self.mcp_request_with_retry("initialize", {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "clientInfo": {"name": "Advanced-STS-Local-AI-Assistant", "version": "0.1.3 Beta"}
+                "clientInfo": {"name": "Advanced-STS-Local-AI-Assistant", "version": "0.1.4 Beta"}
             })
             
             if not init_result:
@@ -3166,12 +3168,11 @@ class AIAssistantGUI(QMainWindow):
         template = open(rules_path, "r", encoding="utf-8").read()
         template = template.replace("\\_", "_")  # === Markdown File auto-escapes underscores ===
 
-        # === Inject dynamic values ===
-        prompt = template.format(
-            separator="=" * 60,
-            original_query=original_query,
-            results_text=results_text
-        )
+        # === Use replace() instead of format() — avoids conflicts with JSON braces in template ===
+        prompt = template
+        prompt = prompt.replace("{separator}", "=" * 60)
+        prompt = prompt.replace("{original_query}", original_query)
+        prompt = prompt.replace("{results_text}", results_text) 
 
         return prompt
 
@@ -3274,7 +3275,8 @@ class AIAssistantGUI(QMainWindow):
 
                 # === Found an Assistant message — look backwards for its User ===
                 if role == 'Assistant' and text and len(text) >= 5:
-                    assistant_text = re.sub(r"[^\w\s,.!?'-]", '', text, flags=re.UNICODE)
+                    # === This regex permits the text to keep the JSON structure: { } [ ] " ' : / \ ===
+                    assistant_text = re.sub(r"[^\w\s,.!?\-\'\"\{\}\[\]:/\\]", '', text, flags=re.UNICODE)
                     assistant_text = ' '.join(assistant_text.split())
                     if len(assistant_text) > 150:
                         assistant_text = assistant_text[:150] + "..."
@@ -3361,7 +3363,7 @@ class AIAssistantGUI(QMainWindow):
         dialog.move(x, y)
 
         # === Version ===
-        version_label = QLabel("Version: 0.1.3 Beta", dialog)
+        version_label = QLabel("Version: 0.1.4 Beta", dialog)
         version_label.setGeometry(140, 2, 200, 20)
         version_label.setStyleSheet("color: #FFFF96; font-weight: bold; font-size: 10pt;")
 
