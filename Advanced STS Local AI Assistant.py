@@ -367,7 +367,7 @@ class AIAssistantGUI(QMainWindow):
         super().__init__()
         
         # ====== INITIALIZE GUI ======
-        self.setWindowTitle("= Advanced STS Local AI Assistant 0.1.4 Beta =")
+        self.setWindowTitle("= Advanced STS Local AI Assistant 0.1.5 Beta =")
         self.setGeometry(0, 0, 1326, 663)
         self.setFixedSize(1326, 663)
         
@@ -2883,7 +2883,7 @@ class AIAssistantGUI(QMainWindow):
                 "model": self.selected_lm_model,
                 "messages": messages,
                 "temperature": self.temperature,
-                "max_tokens": self.max_tokens,
+                "max_tokens": max(self.max_tokens, 512),  # === Minimum 512 to prevent JSON truncation ===
                 "top_k": self.top_k,
                 "repetition_penalty": self.repetition_penalty,
                 "min_p": self.min_p,
@@ -2891,13 +2891,56 @@ class AIAssistantGUI(QMainWindow):
             }
         
             response = requests.post(chat_url, json=payload)
-            response.raise_for_status()
+            if response.status_code != 200:
+                error_body = response.text[:500]  # === Log first 500 chars of error response ===
+                logging.error(f"LM Studio HTTP {response.status_code}: {error_body}")
+                return None
             data = response.json()
             return data['choices'][0]['message']['content'].strip()
         
         except Exception as e:
             logging.error(f"LM Studio error: {str(e)}")
             self.show_warning_signal.emit("LM Studio Error", f"Communication error:\n{str(e)}")
+            return None
+
+    def query_lm_studio_chain(self, follow_up_prompt):
+        """
+        === Dedicated LLM call for MCP chain execution ===
+        === No system prompt injection, no memory context ===
+        === Clean focused call — only Tool Chain Rules + results ===
+        """
+        logging.info("Thinking: MCP chain follow-up query")
+
+        if not self.selected_lm_model or "No loaded models" in self.selected_lm_model:
+            logging.warning("Chain query aborted: No model loaded.")
+            return None
+
+        try:
+            base_url = self.lm_server.rstrip('/')
+            chat_url = f"{base_url}/v1/chat/completions"
+
+            messages = [
+                {"role": "user", "content": follow_up_prompt}
+            ]
+
+            payload = {
+                "model":              self.selected_lm_model,
+                "messages":           messages,
+                "temperature":        self.temperature,
+                "max_tokens":         max(self.max_tokens, 512),  # === Minimum 512 for JSON responses ===
+                "top_k":              self.top_k,
+                "repetition_penalty": self.repetition_penalty,
+                "min_p":              self.min_p,
+                "top_p":              self.top_p
+            }
+
+            response = requests.post(chat_url, json=payload)
+            response.raise_for_status()
+            data = response.json()
+            return data['choices'][0]['message']['content'].strip()
+
+        except Exception as e:
+            logging.error(f"Chain LLM error: {str(e)}")
             return None
 
     # ====== MCP STANDARD CLIENT - JSON-RPC 2.0 ======
@@ -2994,7 +3037,7 @@ class AIAssistantGUI(QMainWindow):
             init_result = self.mcp_request_with_retry("initialize", {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "clientInfo": {"name": "Advanced-STS-Local-AI-Assistant", "version": "0.1.4 Beta"}
+                "clientInfo": {"name": "Advanced-STS-Local-AI-Assistant", "version": "0.1.5 Beta"}
             })
             
             if not init_result:
@@ -3078,13 +3121,17 @@ class AIAssistantGUI(QMainWindow):
             {"role": "assistant", "content": initial_response}
         ]
         
+        # === Safe defaults — prevents UnboundLocalError on early exit ===
+        clean_response = ""
+        results        = []
+
         # === Loop for multi-step tool calling ===
         for iteration in range(self.mcp_max_iterations):
             logging.info(f"🔄 MCP Iteration {iteration + 1}/{self.mcp_max_iterations}")
             
             # === Parse tool calls from the last AI response ===
             last_response = conversation[-1]["content"]
-            tool_calls = self.parse_tool_calls(last_response)
+            tool_calls    = self.parse_tool_calls(last_response)
             
             if not tool_calls:
                 # === No more tool calls → final answer! ===
@@ -3128,23 +3175,35 @@ class AIAssistantGUI(QMainWindow):
             # === Build SPECIAL prompt for AI ===
             follow_up_prompt = self.build_mcp_follow_up_prompt(user_query, results)
             
-            # === Send to AI for processing ===
-            next_response = self.query_lm_studio(follow_up_prompt)
+            # === Send to AI for processing via dedicated chain call ===
+            next_response = self.query_lm_studio_chain(follow_up_prompt)
             
             if not next_response:
                 logging.error("❌ AI returned None, stopping chain")
                 break
             
-            # === Add in conversation history ===
-            conversation.append({"role": "user", "content": follow_up_prompt})
+            # === Add to conversation history ===
+            conversation.append({"role": "user",      "content": follow_up_prompt})
             conversation.append({"role": "assistant", "content": next_response})
         
         # === Extract the final clean response (no JSON) ===
         final_response = conversation[-1]["content"]
-        clean_response = self.extract_text_response(final_response)
-        
+        clean_response = self.extract_text_response(final_response)  # === WAS MISSING! ===
+
+        # === If final response has no text, build summary from last tool results ===
+        if not clean_response and results:
+            last_result = results[-1]
+            tool_name   = last_result.get("tool", "")
+            result_data = last_result.get("result", {})
+            if result_data.get("ok"):
+                clean_response = f"Done — {tool_name} completed successfully."
+            else:
+                clean_response = f"Something went wrong with {tool_name}."
+        elif not clean_response:
+            clean_response = "Done."
+
         logging.info(f"✅ MCP chain finished after {len(conversation)//2} iterations")
-        
+
         return clean_response
     
     def build_mcp_follow_up_prompt(self, original_query, tool_results):
@@ -3244,8 +3303,8 @@ class AIAssistantGUI(QMainWindow):
         # === Cleanup whitespace ===
         clean_text = " ".join(clean_text.split()).strip()
         
-        # === If left blank, return original ===
-        return clean_text if clean_text else response
+        # === If only JSON was in response, return a neutral fallback ===
+        return clean_text if clean_text else ""
 
 
     def get_recent_conversation(self, max_pairs=3):
@@ -3363,7 +3422,7 @@ class AIAssistantGUI(QMainWindow):
         dialog.move(x, y)
 
         # === Version ===
-        version_label = QLabel("Version: 0.1.4 Beta", dialog)
+        version_label = QLabel("Version: 0.1.5 Beta", dialog)
         version_label.setGeometry(140, 2, 200, 20)
         version_label.setStyleSheet("color: #FFFF96; font-weight: bold; font-size: 10pt;")
 
