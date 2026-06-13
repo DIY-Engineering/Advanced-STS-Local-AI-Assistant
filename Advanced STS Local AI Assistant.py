@@ -90,7 +90,7 @@ _created = create_folder_structure()
 
 # ====== LOGGING CONFIG ======
 MCP_SERVER_DIR  = os.path.join(BASE_DIR, "MCP Server")
-MCP_SERVER_FILE = os.path.join(MCP_SERVER_DIR, "MCP Server.py")
+MCP_SERVER_FILE = os.path.join(MCP_SERVER_DIR, "MCP Server 0.1.1 Beta.py")
 LOG_DIR = os.path.join(BASE_DIR, "Debug Logs")
 
 class Utf8StreamHandler(logging.StreamHandler):
@@ -367,7 +367,7 @@ class AIAssistantGUI(QMainWindow):
         super().__init__()
         
         # ====== INITIALIZE GUI ======
-        self.setWindowTitle("= Advanced STS Local AI Assistant 0.1.5 Beta =")
+        self.setWindowTitle("= Advanced STS Local AI Assistant 0.1.6 Beta =")
         self.setGeometry(0, 0, 1326, 663)
         self.setFixedSize(1326, 663)
         
@@ -460,6 +460,7 @@ class AIAssistantGUI(QMainWindow):
         self.repetition_penalty = 1.1
         self.min_p = 0.05
         self.top_p = 0.95
+        self.thinking_enabled = False  # === Think/No Think flag for LLM calls ===
         self.recording_paused = False
         self.tts_lock = threading.Lock()
         self.speaker_latents = None
@@ -924,7 +925,7 @@ class AIAssistantGUI(QMainWindow):
         chat_frame.setStyleSheet(group_style)
         
         self.chat_text = QTextEdit(chat_frame)
-        self.chat_text.setGeometry(8, 24, 634, 282)
+        self.chat_text.setGeometry(8, 24, 634, 256)
         self.chat_text.setReadOnly(True)
         self.chat_text.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         # === Apply Scrollbar Style ===
@@ -938,6 +939,41 @@ class AIAssistantGUI(QMainWindow):
                 font-size: 10pt;
             }
         """ + SCROLLBAR_STYLE)
+
+        # === Manual text input field ===
+        self.chat_input = QTextEdit(chat_frame)
+        self.chat_input.setGeometry(8, 286, 528, 20)
+        self.chat_input.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.chat_input.setStyleSheet("""
+            QTextEdit {
+                background-color: #121212;
+                color: #00FF00;
+                border: 1px solid #FFFFFF;
+                border-radius: 5px;
+                font-family: 'Segoe UI';
+                font-size: 10pt;
+            }
+        """)
+
+        # === Send button ===
+        send_btn = QPushButton("Send Message", chat_frame)
+        send_btn.setGeometry(542, 286, 100, 20)
+        send_btn.setStyleSheet(self.button_style)
+        send_btn.clicked.connect(self.send_manual_query)
+        send_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #00FF00;
+                color: #000000;
+                border-radius: 10px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #388E3C;
+            }
+            QPushButton:pressed {
+                background-color: #1B5E20;
+            }
+        """)
         
         load_history_btn = QPushButton("Load History", chat_frame)
         load_history_btn.setGeometry(436, 312, 100, 20)
@@ -1015,6 +1051,26 @@ class AIAssistantGUI(QMainWindow):
         self.lm_model_dropdown.currentTextChanged.connect(lambda text: setattr(self, 'selected_lm_model', text))
         # === We connect the refresh callback ===
         self.lm_model_dropdown.set_refresh_callback(self.load_lm_models)
+
+        # === Thinking label + radio buttons ===
+        thinking_label = QLabel("Thinking", lm_frame)
+        thinking_label.setGeometry(194, 20, 55, 20)
+        thinking_label.setStyleSheet("color: #FFFFFF; border: none;")
+
+        self.thinking_group = QButtonGroup(lm_frame)
+
+        self.radio_think_on = QRadioButton("On", lm_frame)
+        self.radio_think_on.setGeometry(240, 20, 40, 20)
+        self.radio_think_on.setStyleSheet
+        self.radio_think_on.toggled.connect(lambda checked: setattr(self, 'thinking_enabled', True) if checked else None)
+        self.thinking_group.addButton(self.radio_think_on, 0)
+
+        self.radio_think_off = QRadioButton("Off", lm_frame)
+        self.radio_think_off.setGeometry(280, 20, 45, 20)
+        self.radio_think_off.setStyleSheet
+        self.radio_think_off.toggled.connect(lambda checked: setattr(self, 'thinking_enabled', False) if checked else None)
+        self.thinking_group.addButton(self.radio_think_off, 1)
+        self.radio_think_off.setChecked(True)  # === Default: No Think ===
         
         prompt_label = QLabel("System Prompt", lm_frame)
         prompt_label.setGeometry(10, 64, 150, 20)
@@ -1339,8 +1395,8 @@ class AIAssistantGUI(QMainWindow):
         radio_mcp_no.setChecked(True)
         self.mcp_group.addButton(radio_mcp_no, 1)
         
-        real_talk_label = QLabel("Real Talk", system_frame)
-        real_talk_label.setGeometry(238, 128, 80, 20)
+        real_talk_label = QLabel("Real Talk 🎧", system_frame)
+        real_talk_label.setGeometry(230, 128, 80, 20)
         real_talk_label.setStyleSheet("color: #FFFFFF; border: none; font-weight: bold; font-size: 9pt;")
         
         self.real_talk_group = QButtonGroup(system_frame)
@@ -1825,6 +1881,60 @@ class AIAssistantGUI(QMainWindow):
                 self.resume_event.set()
                 logging.info("Microphone resumed (safety fallback).")
 
+    def send_manual_query(self):
+        """
+        === Handles manual text input from chat input field ===
+        === Routes through same pipeline as voice input ===
+        """
+        text = self.chat_input.toPlainText().strip()
+        if not text:
+            return
+
+        # === Clear input field ===
+        self.chat_input.clear()
+
+        # === Route through same pipeline as voice ===
+        logging.info(f"Manual input: {text}")
+        self.append_log("User", text)
+
+        # === Process in separate thread to avoid GUI freeze ===
+        thread = threading.Thread(
+            target=self._process_manual_query_thread,
+            args=(text,),
+            daemon=True
+        )
+        thread.start()
+
+    def _process_manual_query_thread(self, text):
+        """
+        === Background thread for manual query processing ===
+        === Wake word is bypassed — typing is already an intentional action ===
+        """
+        try:
+            # === Manual input always bypasses wake word ===
+            prompt_to_process = text
+
+            initial_response = self.query_lm_studio(prompt_to_process)
+            if not initial_response:
+                return
+
+            tool_calls = self.parse_tool_calls(initial_response)
+
+            if tool_calls and self.use_mcp_server:
+                logging.info("🔗 MCP workflow detected")
+                final_response_text = self.mcp_chain_executor(prompt_to_process, initial_response)
+            else:
+                logging.info("💬 Simple chat mode")
+                final_response_text = self.extract_text_response(initial_response)
+
+            if final_response_text:
+                logging.info(f"Assistant: {final_response_text}")
+                self.append_log("Assistant", final_response_text)
+                self.tts_queue.put((final_response_text, None))
+
+        except Exception as e:
+            logging.error(f"Error in manual query: {str(e)}")
+
     def extract_json_blocks(self, text: str):
         blocks = []
         stack = 0
@@ -2127,6 +2237,12 @@ class AIAssistantGUI(QMainWindow):
             idx = 0 if self.wake_word_enabled else 1
             if self.wake_word_group.button(idx): self.wake_word_group.button(idx).setChecked(True)
 
+            # === Apply thinking setting ===
+        if 'thinking_enabled' in settings:
+            self.thinking_enabled = settings.get("thinking_enabled", False)
+            self.radio_think_on.setChecked(self.thinking_enabled)
+            self.radio_think_off.setChecked(not self.thinking_enabled)        
+ 
         if 'use_mcp_server' in settings:
             mcp_enabled = settings['use_mcp_server'].lower() == 'true'
             # === Always reset mcp_connected so init runs fresh on every profile load ===
@@ -2863,6 +2979,12 @@ class AIAssistantGUI(QMainWindow):
             # === INJECT MEMORY IN SYSTEM PROMPT ===
             if memory_context:
                 system_prompt += f"\n\n{memory_context}"
+            
+            # === Inject thinking flag — /think or /no_think prefix for models that support it ===
+            if self.thinking_enabled:
+                prompt = "/think\n" + prompt
+            else:
+                prompt = "/no_think\n" + prompt
 
             # ====== FULL PROMPT LOGGING — what LLM actually receives ======
             logging.debug("=" * 60)
@@ -2870,6 +2992,7 @@ class AIAssistantGUI(QMainWindow):
             logging.debug("-" * 60)
             logging.debug(f"📤 SYSTEM PROMPT SENT TO LLM:\n{system_prompt}")
             logging.debug("=" * 60)
+
 
             base_url = self.lm_server.rstrip('/')
             chat_url = f"{base_url}/v1/chat/completions"
@@ -2916,6 +3039,20 @@ class AIAssistantGUI(QMainWindow):
             return None
 
         try:
+            # === Inject thinking flag — /think or /no_think prefix for models that support it ===
+            if self.thinking_enabled:
+                follow_up_prompt = "/think\n" + follow_up_prompt
+            else:
+                follow_up_prompt = "/no_think\n" + follow_up_prompt
+
+            base_url = self.lm_server.rstrip('/')
+            chat_url = f"{base_url}/v1/chat/completions"
+
+            messages = [
+                {"role": "user", "content": follow_up_prompt}
+            ]
+
+            base_url = self.lm_server.rstrip('/')
             base_url = self.lm_server.rstrip('/')
             chat_url = f"{base_url}/v1/chat/completions"
 
@@ -2951,6 +3088,7 @@ class AIAssistantGUI(QMainWindow):
         Contains no business logic - only HTTP communication
         """
         try:
+
             base_url = self.mcp_server.rstrip('/')
             self.mcp_request_id += 1
             
@@ -3037,7 +3175,7 @@ class AIAssistantGUI(QMainWindow):
             init_result = self.mcp_request_with_retry("initialize", {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "clientInfo": {"name": "Advanced-STS-Local-AI-Assistant", "version": "0.1.5 Beta"}
+                "clientInfo": {"name": "Advanced-STS-Local-AI-Assistant", "version": "0.1.6 Beta"}
             })
             
             if not init_result:
@@ -3422,7 +3560,7 @@ class AIAssistantGUI(QMainWindow):
         dialog.move(x, y)
 
         # === Version ===
-        version_label = QLabel("Version: 0.1.5 Beta", dialog)
+        version_label = QLabel("Version: 0.1.6 Beta", dialog)
         version_label.setGeometry(140, 2, 200, 20)
         version_label.setStyleSheet("color: #FFFF96; font-weight: bold; font-size: 10pt;")
 
@@ -3713,6 +3851,7 @@ class AIAssistantGUI(QMainWindow):
             'coqui_device':             self.coqui_device,
             'wake_word':                self.wake_word,
             'wake_word_enabled':        str(self.wake_word_enabled),
+            'thinking_enabled':         self.thinking_enabled,
             'use_mcp_server':           str(self.use_mcp_server),
             'real_talk_enabled':        str(self.real_talk_enabled),
             'rag_memory_enabled':       str(self.rag_memory_enabled),
