@@ -10,6 +10,7 @@ import emoji
 import torch
 import glob
 import gc
+import traceback
 import requests
 import json
 from datetime import datetime
@@ -356,6 +357,1825 @@ class TextHandler(logging.Handler):
         except Exception as e:
             print(f"Error in TextHandler: {str(e)}")
 
+class ProfileManager:
+    """
+    === ProfileManager — Profile JSON I/O and path management ===
+    === Pure file I/O — no GUI widgets, no dialogs ===
+    === GUI dialogs (QMessageBox/QFileDialog) and widget reads stay in AIAssistantGUI ===
+    """
+
+    RESERVED_PROFILE_NAMES = {"Jarvis"}
+
+    def __init__(self, settings_dir, history_dir, rag_database_dir):
+        self.settings_dir     = settings_dir
+        self.history_dir      = history_dir
+        self.rag_database_dir = rag_database_dir
+
+    # ===================
+    # === PROFILE I/O ===
+    # ===================
+
+    def save_profile(self, file_path, settings_dict):
+        """Write settings dict as JSON to file_path."""
+        with open(file_path, 'w', encoding='utf-8') as f:
+            json.dump(settings_dict, f, indent=2, ensure_ascii=False)
+        logging.info(f"Settings saved to {file_path}")
+
+    def load_profile(self, file_path):
+        """Read settings dict from JSON file_path. Returns None on failure."""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            logging.error(f"Error loading profile '{file_path}': {str(e)}")
+            return None
+
+    def list_profiles(self):
+        """Return list of available profile names (without .json extension)."""
+        try:
+            if not os.path.exists(self.settings_dir):
+                return []
+            files = [f for f in os.listdir(self.settings_dir) if f.endswith('.json')]
+            return [os.path.splitext(f)[0] for f in files]
+        except Exception as e:
+            logging.error(f"Error listing profiles: {str(e)}")
+            return []
+
+    def is_reserved_name(self, name):
+        """Check if a profile name is reserved (e.g. 'Jarvis')."""
+        return name in self.RESERVED_PROFILE_NAMES
+
+    def validate_profile_name(self, file_path):
+        """Returns True if profile name (from file_path) is NOT reserved."""
+        name = os.path.splitext(os.path.basename(file_path))[0]
+        return not self.is_reserved_name(name)
+
+    # ====================
+    # === PATH HELPERS ===
+    # ====================
+
+    def get_chat_log_path(self, profile_name):
+        """Return chat log .txt path for a given profile."""
+        return os.path.join(self.history_dir, f"{profile_name}.txt")
+
+    def get_rag_dir_path(self, profile_name):
+        """Return RAG database directory path for a given profile."""
+        return os.path.join(self.rag_database_dir, profile_name)
+
+    def ensure_profile_directories(self, profile_name):
+        """Create chat history and RAG directories for a profile if missing."""
+        os.makedirs(self.history_dir, exist_ok=True)
+        rag_dir = self.get_rag_dir_path(profile_name)
+        os.makedirs(rag_dir, exist_ok=True)
+        return rag_dir
+
+    def delete_profile(self, profile_name):
+        """Delete a profile's JSON file. Returns True on success."""
+        if self.is_reserved_name(profile_name):
+            logging.warning(f"Cannot delete reserved profile: {profile_name}")
+            return False
+        try:
+            file_path = os.path.join(self.settings_dir, f"{profile_name}.json")
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                logging.info(f"Profile deleted: {profile_name}")
+                return True
+            return False
+        except Exception as e:
+            logging.error(f"Error deleting profile '{profile_name}': {str(e)}")
+            return False
+
+
+class RAGManager:
+    """
+    === RAGManager — ChromaDB + MiniLM-L6-v2 Semantic Memory ===
+    === Handles: indexing, semantic search, recent conversation context ===
+    === Decoupled from GUI via callbacks and config_getter ===
+    """
+
+    def __init__(self, show_warning_signal, get_chat_history, config_getter):
+        """
+        Args:
+            show_warning_signal : pyqtSignal(str, str) — thread-safe warning dialog
+            get_chat_history    : callable() -> list — returns current chat_history
+            config_getter       : callable() -> dict — rag_memory_enabled, current_rag_dir
+        """
+        # === Callbacks ===
+        self.show_warning    = show_warning_signal
+        self.get_chat_history = get_chat_history
+        self.get_config      = config_getter
+
+        # === Internal state ===
+        self.rag_embedder    = None
+        self.rag_client      = None
+        self.rag_collection  = None
+
+        # === Threading ===
+        self.rag_queue       = queue.Queue()
+        self.rag_event       = threading.Event()
+        self.rag_thread      = None
+
+    # ==================
+    # === PUBLIC API ===
+    # ==================
+
+    def start(self):
+        """Initialize RAG system and start worker thread."""
+        self.init_rag_system()
+        self.rag_thread = threading.Thread(target=self.rag_worker, daemon=True)
+        self.rag_thread.start()
+        logging.info("RAG worker thread started.")
+
+    def stop(self):
+        """Graceful shutdown — signal worker thread to exit."""
+        self.rag_event.set()
+        self.rag_queue.put(None)
+
+    def index_message(self, role, text, timestamp):
+        """Queue a message for async indexing into ChromaDB."""
+        self.rag_queue.put((role, text, timestamp))
+
+    def switch_profile(self, new_rag_dir):
+        """
+        Switch RAG database to a different profile directory.
+        Closes current client and reinitializes pointing to new path.
+        """
+        try:
+            self.rag_collection = None
+            self.rag_client     = None
+            gc.collect()
+
+            self.rag_client = chromadb.PersistentClient(
+                path=new_rag_dir,
+                settings=Settings(anonymized_telemetry=False, allow_reset=True)
+            )
+            self.rag_collection = self.rag_client.get_or_create_collection(
+                name="chat_memory",
+                metadata={"hnsw:space": "cosine"}
+            )
+            self._cleanup_orphaned_rag_folders(new_rag_dir)
+            logging.info(f"RAG reinitialized → '{new_rag_dir}' | Docs: {self.rag_collection.count()}")
+
+        except Exception as e:
+            logging.error(f"RAG reinit error: {str(e)}")
+            self.show_warning.emit("RAG Warning",
+                f"RAG could not be reinitialized:\n{str(e)}")
+
+    def document_count(self):
+        """Return current number of documents in the RAG collection (0 if unavailable)."""
+        try:
+            return self.rag_collection.count() if self.rag_collection else 0
+        except Exception:
+            return 0
+
+    def is_ready(self):
+        """Return True if embedder + collection are both initialized."""
+        return bool(self.rag_embedder and self.rag_collection is not None)
+
+    def rebuild(self, chat_history=None, include_mcp=False):
+        """
+        Rebuild RAG database from chat history.
+        Args:
+            chat_history : list | None — defaults to self.get_chat_history() if not provided
+            include_mcp  : bool — if True, also indexes "MCP Request"/"MCP Response" entries
+        Returns: int — number of messages queued for indexing
+        """
+        try:
+            if not self.rag_client:
+                logging.warning("RAG client not initialized — cannot rebuild.")
+                return 0
+
+            allowed_roles = {"User", "Assistant"}
+            if include_mcp:
+                allowed_roles |= {"MCP Request", "MCP Response"}
+
+            # === Clear existing documents ===
+            self.rag_collection = self.rag_client.get_or_create_collection(
+                name="chat_memory",
+                metadata={"hnsw:space": "cosine"}
+            )
+            existing = self.rag_collection.get()
+            existing_ids = existing.get('ids', [])
+            if existing_ids:
+                self.rag_collection.delete(ids=existing_ids)
+                logging.info(f"Cleared {len(existing_ids)} existing documents")
+
+            history = chat_history if chat_history is not None else self.get_chat_history()
+            count = 0
+            for entry in history:
+                role      = entry.get("role", "")
+                text      = entry.get("text", "").strip()
+                timestamp = entry.get("timestamp", "")
+                if role in allowed_roles and text:
+                    self.index_message(role, text, timestamp)
+                    count += 1
+
+            logging.info(f"RAG rebuild queued: {count} messages")
+            return count
+
+        except Exception as e:
+            logging.error(f"RAG rebuild error: {str(e)}")
+            return 0
+
+    def release_for_move(self):
+        """
+        Stop worker + release all ChromaDB file handles (client.reset()).
+        Used before moving/deleting the RAG directory on disk (profile rename).
+        Caller is responsible for restarting via start_worker() after the move.
+        """
+        # === Stop RAG worker thread ===
+        if self.rag_thread and self.rag_thread.is_alive():
+            self.rag_queue.put(None)
+            self.rag_thread.join(timeout=2)
+            logging.info("RAG worker thread stopped.")
+
+        # === client.reset() — explicitly releases ALL file handles (mmap + SQLite WAL) ===
+        # === This is the only reliable way to unlock chroma.sqlite3 and HNSW .bin files on Windows ===
+        try:
+            if self.rag_client is not None:
+                self.rag_client.reset()
+                logging.info("ChromaDB reset() called — all file handles released.")
+        except Exception as e:
+            logging.error(f"Error during ChromaDB reset: {str(e)}")
+        finally:
+            self.rag_collection = None
+            self.rag_client     = None
+            gc.collect()
+            time.sleep(0.3)
+            logging.info("ChromaDB client closed.")
+
+    def start_worker(self):
+        """Restart the RAG worker thread (after release_for_move + switch_profile)."""
+        self.rag_event.clear()
+        self.rag_thread = threading.Thread(target=self.rag_worker, daemon=True)
+        self.rag_thread.start()
+        logging.info("RAG worker thread restarted.")
+
+    def clear(self):
+        """
+        Full RAG reset — stops worker, deletes + recreates collection,
+        VACUUMs the SQLite file to reclaim disk space, restarts worker.
+        Used by 'Clear Chat History' — encapsulates ChromaDB internals
+        so GUI never touches rag_client / rag_collection directly.
+        """
+        cfg = self.get_config()
+        current_rag_dir = cfg["current_rag_dir"]
+
+        # === 1. Stop RAG worker thread — it holds a lock on chroma.sqlite3 ===
+        try:
+            if self.rag_thread and self.rag_thread.is_alive():
+                self.rag_queue.put(None)
+                self.rag_thread.join(timeout=2)
+                logging.info("RAG worker thread stopped.")
+        except Exception as e:
+            logging.error(f"Error stopping RAG thread: {str(e)}")
+
+        # === 2. Delete + recreate collection + explicit VACUUM ===
+        # === ChromaDB holds a SQLite connection pool for the entire process lifetime. ===
+        # === shutil.rmtree() will always fail with WinError 32 while the process runs. ===
+        # === We delete the collection, recreate it fresh, then run VACUUM directly on ===
+        # === chroma.sqlite3 via Python's sqlite3 module to reclaim the physical space. ===
+        try:
+            if self.rag_client is not None:
+                self.rag_client.delete_collection("chat_memory")
+                logging.info("RAG collection deleted.")
+
+                self.rag_collection = self.rag_client.create_collection(
+                    name="chat_memory",
+                    metadata={"hnsw:space": "cosine"}
+                )
+                self._cleanup_orphaned_rag_folders(current_rag_dir)
+                logging.info("Fresh RAG collection created.")
+
+                # === VACUUM directly on chroma.sqlite3 to reclaim disk space ===
+                # === SQLite marks deleted pages as free but keeps file size without VACUUM ===
+                import sqlite3 as _sqlite3
+                sqlite_path = os.path.join(current_rag_dir, "chroma.sqlite3")
+                if os.path.exists(sqlite_path):
+                    try:
+                        conn = _sqlite3.connect(sqlite_path)
+                        conn.execute("VACUUM")
+                        conn.close()
+                        size_kb = os.path.getsize(sqlite_path) / 1024
+                        logging.info(f"SQLite VACUUM complete — file size: {size_kb:.1f} KB")
+                    except Exception as ve:
+                        logging.warning(f"VACUUM failed (non-critical): {str(ve)}")
+            else:
+                # === Client not available — full reinit as fallback ===
+                self.switch_profile(current_rag_dir)
+                logging.info("RAG reinitialized (fallback).")
+        except Exception as e:
+            logging.error(f"Error resetting RAG collection: {str(e)}")
+            self.switch_profile(current_rag_dir)
+
+        # === 3. Restart RAG worker thread ===
+        try:
+            self.rag_event.clear()
+            self.rag_thread = threading.Thread(target=self.rag_worker, daemon=True)
+            self.rag_thread.start()
+            logging.info("RAG worker thread restarted.")
+        except Exception as e:
+            logging.error(f"Error restarting RAG thread: {str(e)}")
+
+    # =====================
+    # === WORKER THREAD ===
+    # =====================
+
+    def rag_worker(self):
+        """Background thread for async vector indexing."""
+        try:
+            while not self.rag_event.is_set():
+                try:
+                    item = self.rag_queue.get(timeout=0.5)
+                    if item is None:
+                        break
+
+                    role, text, timestamp = item
+
+                    cfg = self.get_config()
+                    if not cfg["rag_memory_enabled"] or not self.rag_embedder:
+                        continue
+
+                    # === Embedding generation ===
+                    embedding = self.rag_embedder.encode(text).tolist()
+
+                    # === Unique ID based on timestamp ===
+                    doc_id = f"{role}_{timestamp.replace(' ', '_').replace(':', '-')}"
+
+                    # === Add to ChromaDB ===
+                    self.rag_collection.add(
+                        embeddings=[embedding],
+                        documents=[text],
+                        metadatas=[{"role": role, "timestamp": timestamp}],
+                        ids=[doc_id]
+                    )
+
+                    logging.info(f"RAG: Indexed {role} message (ID: {doc_id})")
+
+                except queue.Empty:
+                    continue
+                except Exception as e:
+                    logging.error(f"RAG Worker Error: {str(e)}")
+
+        except Exception as e:
+            logging.error(f"Critical RAG Worker Error: {str(e)}")
+
+    # =============
+    # === QUERY ===
+    # =============
+
+    def query(self, query_text, top_k=6, recent_lines=None):
+        """
+        Semantic memory query — returns relevant past messages.
+        Args:
+            query_text   : current user message
+            top_k        : max messages to return
+            recent_lines : set of normalized texts already in recent_context (dedup)
+        Returns: formatted string with relevant past messages
+        """
+        try:
+            cfg = self.get_config()
+            if not cfg["rag_memory_enabled"] or not self.rag_embedder or self.rag_collection.count() == 0:
+                return ""
+
+            if recent_lines is None:
+                recent_lines = set()
+
+            query_embedding = self.rag_embedder.encode(query_text).tolist()
+
+            results = self.rag_collection.query(
+                query_embeddings=[query_embedding],
+                n_results=min(top_k * 3, self.rag_collection.count())
+            )
+
+            if not results['documents'] or not results['documents'][0]:
+                return ""
+
+            candidates = []
+            seen_texts = set()
+
+            for doc, meta in zip(results['documents'][0], results['metadatas'][0]):
+                role      = meta.get('role', 'Unknown')
+                timestamp = meta.get('timestamp', '')
+
+                if role not in ('User', 'Assistant'):
+                    continue
+
+                import re
+                doc_clean = re.sub(r"[^\w\s,.!?'-]", '', doc, flags=re.UNICODE)
+                doc_clean = ' '.join(doc_clean.split())
+
+                if not doc_clean.strip() or len(doc_clean.strip()) < 5:
+                    continue
+
+                if len(doc_clean) > 150:
+                    doc_clean = doc_clean[:150] + "..."
+
+                doc_normalized = doc_clean.lower()[:80]
+                if doc_normalized in recent_lines:
+                    continue
+
+                if doc_clean in seen_texts:
+                    continue
+                seen_texts.add(doc_clean)
+
+                candidates.append((timestamp, role, doc_clean))
+
+            candidates.sort(key=lambda x: x[0])
+
+            pairs = []
+            i = 0
+            while i < len(candidates) and len(pairs) < (top_k // 2):
+                ts, role, text = candidates[i]
+                if role == 'User':
+                    if i + 1 < len(candidates) and candidates[i + 1][1] == 'Assistant':
+                        pairs.append((text, candidates[i + 1][2]))
+                        i += 2
+                    else:
+                        i += 1
+                else:
+                    i += 1
+
+            context_parts = []
+            for user_text, assistant_text in pairs:
+                context_parts.append(f"User: {user_text}")
+                context_parts.append(f"Assistant: {assistant_text}")
+
+            context = "\n".join(context_parts)
+
+            max_chars = 2000
+            if len(context) > max_chars:
+                context = context[:max_chars]
+                last_newline = context.rfind('\n')
+                if last_newline > 0:
+                    context = context[:last_newline]
+
+            logging.info(f"RAG: {len(pairs)} pairs (~{len(context)//4} tokens)")
+            return context
+
+        except Exception as e:
+            logging.error(f"RAG Query Error: {str(e)}")
+            return ""
+
+    def get_recent_conversation(self, max_pairs=3):
+        """
+        Extract last N User→Assistant pairs from chat history.
+        Returns formatted string in chronological order.
+        """
+        try:
+            chat_history = self.get_chat_history()
+            if not chat_history:
+                return ""
+
+            import re
+            pairs = []
+
+            i = len(chat_history) - 1
+            while i >= 0 and len(pairs) < max_pairs:
+                entry = chat_history[i]
+                role  = entry.get('role', '')
+                text  = entry.get('text', '').strip()
+
+                if role == 'Assistant' and text and len(text) >= 5:
+                    assistant_text = re.sub(r"[^\w\s,.!?\-\'\"\{\}\[\]:/\\]", '', text, flags=re.UNICODE)
+                    assistant_text = ' '.join(assistant_text.split())
+                    if len(assistant_text) > 150:
+                        assistant_text = assistant_text[:150] + "..."
+
+                    j = i - 1
+                    while j >= 0:
+                        prev = chat_history[j]
+                        if prev.get('role') == 'User':
+                            user_text = prev.get('text', '').strip()
+                            user_text = re.sub(r"[^\w\s,.!?'-]", '', user_text, flags=re.UNICODE)
+                            user_text = ' '.join(user_text.split())
+                            if len(user_text) > 150:
+                                user_text = user_text[:150] + "..."
+                            if len(user_text) >= 5:
+                                pairs.append((user_text, assistant_text))
+                            i = j - 1
+                            break
+                        j -= 1
+                    else:
+                        i -= 1
+                else:
+                    i -= 1
+
+            pairs.reverse()
+
+            context_parts = []
+            for user_text, assistant_text in pairs:
+                context_parts.append(f"User: {user_text}")
+                context_parts.append(f"Assistant: {assistant_text}")
+
+            result = "\n".join(context_parts)
+            logging.info(f"Recent: {len(pairs)} pairs (~{len(result)//4} tokens)")
+            return result
+
+        except Exception as e:
+            logging.error(f"Error getting recent conversation: {str(e)}")
+            return ""
+
+    # ================
+    # === INTERNAL ===
+    # ================
+
+    def init_rag_system(self):
+        """Load MiniLM embedder and initialize ChromaDB."""
+        try:
+            cfg = self.get_config()
+            logging.info("Loading RAG Embedder Model (MiniLM-L6-v2)...")
+            self.rag_embedder = SentenceTransformer(RAG_EMBEDDER_DIR)
+            logging.info("RAG Embedder loaded successfully.")
+
+            self.rag_client = chromadb.PersistentClient(
+                path=cfg["current_rag_dir"],
+                settings=Settings(anonymized_telemetry=False, allow_reset=True)
+            )
+            self.rag_collection = self.rag_client.get_or_create_collection(
+                name="chat_memory",
+                metadata={"hnsw:space": "cosine"}
+            )
+            self._cleanup_orphaned_rag_folders(cfg["current_rag_dir"])
+            logging.info(f"RAG Database initialized. Documents: {self.rag_collection.count()}")
+
+        except Exception as e:
+            logging.error(f"RAG Initialization Error: {str(e)}")
+            self.show_warning.emit("RAG Warning",
+                f"RAG system could not be initialized:\n{str(e)}\n\nContinuing without RAG memory.")
+
+    def _cleanup_orphaned_rag_folders(self, rag_dir):
+        """Remove orphaned ChromaDB UUID folders — fixes WinError 32 on Windows."""
+        if not self.rag_collection or not os.path.exists(rag_dir):
+            return
+        try:
+            active_uuid = str(self.rag_collection.id)
+            for item in os.listdir(rag_dir):
+                item_path = os.path.join(rag_dir, item)
+                if os.path.isdir(item_path) and item != active_uuid:
+                    try:
+                        shutil.rmtree(item_path)
+                        logging.info(f"Removed orphaned RAG folder: {item}")
+                    except Exception as e:
+                        logging.warning(f"Could not remove orphaned folder '{item}': {e}")
+        except Exception as e:
+            logging.warning(f"Orphaned folder cleanup failed: {e}")
+
+
+class AudioProcessor:
+    """
+    === AudioProcessor — VAD + PyAudio Input + Faster-Whisper STT ===
+    === Handles microphone capture, speech detection and transcription ===
+    === Decoupled from GUI via callbacks and config_getter ===
+    """
+
+    def __init__(self,
+                 vu_input_signal,
+                 on_speech_detected,
+                 stop_tts_callback,
+                 is_tts_active,
+                 is_real_talk,
+                 show_error_signal,
+                 config_getter):
+        """
+        Args:
+            vu_input_signal    : pyqtSignal(int) — VU meter for microphone
+            on_speech_detected : callable(frames) — called with audio frames when speech ends
+            stop_tts_callback  : callable() — interrupt TTS on barge-in
+            is_tts_active      : callable() -> bool — is TTS currently playing?
+            is_real_talk       : callable() -> bool — is Real Talk mode enabled?
+            show_error_signal  : pyqtSignal(str, str) — thread-safe error dialog
+            config_getter      : callable() -> dict — all audio/STT config params
+        """
+        # === Callbacks & signals ===
+        self.vu_input_signal    = vu_input_signal
+        self.on_speech_detected = on_speech_detected
+        self.stop_tts           = stop_tts_callback
+        self.is_tts_active      = is_tts_active
+        self.is_real_talk       = is_real_talk
+        self.show_error         = show_error_signal
+        self.get_config         = config_getter
+
+        # === VAD state ===
+        self.vad_model          = None
+
+        # === PyAudio state ===
+        self.audio_pyaudio      = None
+        self.audio_stream       = None
+
+        # === Whisper state ===
+        self.faster_whisper_model    = None
+        self.current_whisper_model   = None
+        self.current_whisper_device  = None
+        self.whisper_compute_type    = None
+
+        # === Threading ===
+        self.stop_event         = threading.Event()
+        self.recording_paused   = False
+        self.resume_event       = threading.Event()
+
+    # ==================
+    # === PUBLIC API ===
+    # ==================
+
+    def start(self, device_index):
+        """Start audio recording on a new thread."""
+        self.stop_event.clear()
+        self.recording_paused = False
+        thread = threading.Thread(
+            target=self.record_audio_continuous,
+            args=(device_index,),
+            daemon=True
+        )
+        thread.start()
+        return thread
+
+    def stop(self):
+        """Signal recording to stop."""
+        self.stop_event.set()
+        self.resume_event.set()  # === Unblock any paused wait ===
+
+    def pause_mic(self):
+        """Pause microphone — called after speech detected (Standard Mode)."""
+        self.recording_paused = True
+        logging.info("Microphone PAUSED.")
+        self.vu_input_signal.emit(0)
+
+    def resume_mic(self):
+        """Resume microphone — called after TTS completes."""
+        self.recording_paused = False
+        self.resume_event.set()
+        logging.info("Microphone RESUMED.")
+
+    def load_devices(self):
+        """Return (mics, outputs) — lists of available audio devices."""
+        mics    = []
+        outputs = []
+        try:
+            p = pyaudio.PyAudio()
+            logging.info("Loading audio input devices")
+            for i in range(p.get_device_count()):
+                dev = p.get_device_info_by_index(i)
+                if dev.get('maxInputChannels', 0) > 0:
+                    mics.append(f"{i}: {dev['name']}")
+            logging.info(f"Microphones loaded: {mics}")
+
+            logging.info("Loading audio output devices")
+            for i in range(p.get_device_count()):
+                dev = p.get_device_info_by_index(i)
+                if dev.get('maxOutputChannels', 0) > 0:
+                    outputs.append(f"{i}: {dev['name']}")
+            logging.info(f"Output devices loaded: {outputs}")
+            p.terminate()
+        except Exception as e:
+            logging.error(f"Error loading audio devices: {str(e)}")
+        return mics, outputs
+
+    def cleanup(self):
+        """Release PyAudio stream and instance."""
+        with contextlib.suppress(Exception):
+            if self.audio_stream and self.audio_stream.is_active():
+                self.audio_stream.stop_stream()
+                self.audio_stream.close()
+        with contextlib.suppress(Exception):
+            if self.audio_pyaudio:
+                self.audio_pyaudio.terminate()
+        self.audio_stream  = None
+        self.audio_pyaudio = None
+
+    def release_whisper(self):
+        """Unload Whisper model and free VRAM."""
+        if self.faster_whisper_model is not None:
+            del self.faster_whisper_model
+            self.faster_whisper_model   = None
+            self.current_whisper_model  = None
+            self.current_whisper_device = None
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            logging.info("Whisper model released from memory.")
+
+    # ==================
+    # === SILERO VAD ===
+    # ==================
+
+    def init_silero_vad(self):
+        """Load Silero VAD model from local path."""
+        cfg = self.get_config()
+        logging.info("Loading Silero VAD model")
+        try:
+            vad_model_path = os.path.join(BASE_DIR, "Silero VAD", "Models", "silero_vad.jit")
+            if not os.path.exists(vad_model_path):
+                raise FileNotFoundError(f"Silero VAD model not found at {vad_model_path}")
+
+            self.vad_model = torch.jit.load(vad_model_path, map_location=cfg["vad_device"])
+            self.vad_model.eval()
+            logging.info(f"Silero VAD loaded on {cfg['vad_device']}")
+
+        except Exception as e:
+            logging.error(f"Silero VAD Error: {str(e)}")
+            self.show_error.emit("Silero VAD Error",
+                f"Could not load VAD model:\n\n{str(e)}\n\n"
+                f"Expected location:\n{os.path.join(BASE_DIR, 'Silero VAD', 'Models', 'silero_vad.jit')}"
+            )
+
+    # ============================
+    # === AUDIO RECORDING LOOP ===
+    # ============================
+
+    def record_audio_continuous(self, device_index):
+        """Main audio capture loop — runs on dedicated thread."""
+        try:
+            self.audio_pyaudio = pyaudio.PyAudio()
+            self.audio_stream  = self.audio_pyaudio.open(
+                format=FORMAT,
+                channels=CHANNELS,
+                rate=RATE,
+                input=True,
+                input_device_index=device_index,
+                frames_per_buffer=CHUNK
+            )
+            logging.info("Recording started.")
+
+            frames                 = []
+            recording_active       = False
+            speech_detected_frames = 0
+            silence_detected_frames = 0
+
+            cfg = self.get_config()
+            min_speech_frames  = int(cfg["vad_min_speech_duration"] * RATE / VAD_WINDOW_SIZE)
+            min_silence_frames = int(cfg["vad_min_silence_duration"] * RATE / VAD_WINDOW_SIZE)
+
+            if self.vad_model is None:
+                self.init_silero_vad()
+
+            while not self.stop_event.is_set():
+                cfg = self.get_config()
+
+                # === PAUSE LOGIC — discard buffer to prevent echo ===
+                if self.recording_paused and not self.is_real_talk():
+                    time.sleep(0.05)
+                    self.vu_input_signal.emit(0)
+                    if self.audio_stream:
+                        try:
+                            to_read = self.audio_stream.get_read_available()
+                            if to_read > 0:
+                                self.audio_stream.read(to_read, exception_on_overflow=False)
+                        except:
+                            pass
+                    continue
+
+                try:
+                    audio_data = np.frombuffer(
+                        self.audio_stream.read(CHUNK, exception_on_overflow=False),
+                        dtype=np.int16
+                    )
+
+                    # === Apply mic volume ===
+                    mic_volume_factor = cfg["mic_volume"] / 100.0
+                    audio_data  = (audio_data * mic_volume_factor).astype(np.int16)
+                    audio_float = audio_data.astype(np.float32) / 32768.0
+
+                    # === VU meter ===
+                    rms   = np.sqrt(np.mean(audio_float ** 2))
+                    level = min(int(rms * 100), 14)
+                    self.vu_input_signal.emit(level)
+
+                    # === VAD analysis ===
+                    vad_buffer = audio_float
+                    if len(vad_buffer) >= VAD_WINDOW_SIZE:
+                        audio_chunk = vad_buffer[:VAD_WINDOW_SIZE]
+                        if len(audio_chunk) == VAD_WINDOW_SIZE and self.vad_model:
+                            audio_tensor = torch.tensor(
+                                audio_chunk, dtype=torch.float32
+                            ).unsqueeze(0).to(cfg["vad_device"])
+                            with torch.no_grad():
+                                speech_prob = self.vad_model(audio_tensor, RATE).item()
+                        else:
+                            speech_prob = 0.0
+
+                        # === BARGE-IN (Real Talk mode) ===
+                        if speech_prob > cfg["vad_threshold"]:
+                            if self.is_real_talk() and self.is_tts_active():
+                                logging.info("REAL TALK: Barge-in detected! Stopping TTS...")
+                                self.stop_tts()
+                                time.sleep(0.05)
+                                frames                  = []
+                                recording_active        = True
+                                speech_detected_frames  = 0
+                                silence_detected_frames = 0
+
+                        if speech_prob > cfg["vad_threshold"]:
+                            if not recording_active:
+                                logging.info("Speech started...")
+                                recording_active = True
+                            frames.append(audio_data.tobytes())
+                            speech_detected_frames  += 1
+                            silence_detected_frames  = 0
+                        else:
+                            if recording_active:
+                                frames.append(audio_data.tobytes())
+                                silence_detected_frames += 1
+                                if (silence_detected_frames >= min_silence_frames and
+                                        speech_detected_frames >= min_speech_frames):
+                                    # === END OF SPEECH ===
+                                    logging.info("End of speech detected.")
+
+                                    if not self.is_real_talk():
+                                        self.pause_mic()
+                                        # === Flush buffer to clear last ms of silence ===
+                                        if self.audio_stream:
+                                            try:
+                                                self.audio_stream.read(
+                                                    self.audio_stream.get_read_available(),
+                                                    exception_on_overflow=False
+                                                )
+                                            except: pass
+
+                                    # === Dispatch to processing thread ===
+                                    segment_frames = frames.copy()
+                                    proc_thread = threading.Thread(
+                                        target=self.on_speech_detected,
+                                        args=(segment_frames,),
+                                        daemon=True
+                                    )
+                                    proc_thread.start()
+
+                                    frames                  = []
+                                    recording_active        = False
+                                    speech_detected_frames  = 0
+                                    silence_detected_frames = 0
+                            else:
+                                frames = []
+
+                except Exception as e:
+                    logging.error(f"Error reading audio stream: {str(e)}")
+                    break
+
+        except Exception as e:
+            logging.error(f"Recording error: {str(e)}")
+            self.show_error.emit("Recording Error", f"Recording error: {str(e)}")
+        finally:
+            self.cleanup()
+            if self.is_real_talk() and not self.stop_event.is_set():
+                logging.info("Real Talk: restarting recording loop...")
+
+    # ===================
+    # === WHISPER STT ===
+    # ===================
+
+    def transcribe_audio(self, audio_array):
+        """Transcribe audio using Faster-Whisper (local models only)."""
+        logging.info("Transcribing audio with Faster-Whisper")
+        cfg = self.get_config()
+
+        try:
+            model_name  = cfg["whisper_model"]
+            device      = cfg["whisper_device"]
+
+            model_changed  = (self.current_whisper_model  != model_name)
+            device_changed = (self.current_whisper_device != device)
+
+            if self.faster_whisper_model is None or model_changed or device_changed:
+                # === Release old model ===
+                if self.faster_whisper_model is not None:
+                    logging.info(f"Unloading old Whisper model: {self.current_whisper_model}")
+                    self.release_whisper()
+
+                # === Find local model path ===
+                model_path = self._get_whisper_model_path(model_name)
+                if not model_path:
+                    error_msg = f"Whisper model '{model_name}' not found in local directory!"
+                    logging.error(error_msg)
+                    self.show_error.emit("Model Error",
+                        f"{error_msg}\n\nExpected:\n{WHISPER_MODELS_DIR}\\{model_name}\\model.bin"
+                    )
+                    return None
+
+                # === Compute type ===
+                compute_type = "int8" if device == "cpu" else "int8"
+
+                logging.info(f"Loading Faster-Whisper: {model_name} from {model_path}")
+                logging.info(f"Device: {device} | Compute: {compute_type}")
+
+                try:
+                    self.faster_whisper_model = WhisperModel(
+                        model_path,
+                        device=device,
+                        compute_type=compute_type,
+                        download_root=None,
+                        local_files_only=True
+                    )
+                    self.current_whisper_model  = model_name
+                    self.current_whisper_device = device
+                    self.whisper_compute_type   = compute_type
+                    logging.info("Faster-Whisper loaded successfully!")
+
+                except Exception as load_error:
+                    logging.error(f"Failed to load Whisper model: {str(load_error)}")
+                    self.show_error.emit("Model Load Error",
+                        f"Could not load Whisper model '{model_name}':\n\n{str(load_error)}\n\n"
+                        f"Verify model files exist in:\n{model_path}"
+                    )
+                    return None
+
+            # === Transcribe ===
+            language = cfg["whisper_language"] if cfg["whisper_language"] != "auto" else None
+            audio_duration = len(audio_array) / RATE
+
+            logging.info(f"Processing audio with duration {int(audio_duration//60):02}:{audio_duration%60:05.3f}")
+
+            segments, info = self.faster_whisper_model.transcribe(
+                audio_array,
+                language=language,
+                beam_size=5,
+                vad_filter=False,
+                word_timestamps=False
+            )
+
+            transcription = " ".join([segment.text for segment in segments]).strip()
+
+            if language is None:
+                logging.info(f"Detected language: {info.language} ({info.language_probability:.0%})")
+
+            if transcription:
+                logging.info(f"Transcription: {transcription}")
+
+            return transcription if transcription else None
+
+        except Exception as e:
+            logging.error(f"Transcription error: {str(e)}")
+            logging.error(traceback.format_exc())
+            return None
+
+    # ========================
+    # === INTERNAL HELPERS ===
+    # ========================
+
+    def _get_whisper_model_path(self, model_name):
+        """Find local Whisper model directory."""
+        model_dir = os.path.join(WHISPER_MODELS_DIR, model_name)
+        if os.path.exists(model_dir) and os.path.exists(os.path.join(model_dir, "model.bin")):
+            return model_dir
+        return None
+
+
+class TTSEngine:
+    """
+    === TTSEngine — Coqui XTTS-v2 Text-to-Speech Engine ===
+    === Handles model loading, audio generation and playback ===
+    === Decoupled from GUI — communicates via callbacks and threading.Events ===
+    """
+
+    def __init__(self, vu_output_signal, volume_getter, language_getter, output_device_getter):
+        """
+        Args:
+            vu_output_signal      : pyqtSignal(int) — for VU meter updates
+            volume_getter         : callable() → int — returns current volume level (0-100)
+            language_getter       : callable() → str — returns current whisper language
+            output_device_getter  : callable() → int|None — returns output device index
+        """
+        # === Callbacks & signals from GUI ===
+        self.vu_output_signal      = vu_output_signal
+        self.get_volume            = volume_getter
+        self.get_language          = language_getter
+        self.get_output_device     = output_device_getter
+
+        # === Model state ===
+        self.coqui_model           = None
+        self.speaker_latents       = None
+        self.coqui_device          = "cuda" if torch.cuda.is_available() else "cpu"
+
+        # === TTS parameters (updated from GUI sliders) ===
+        self.coqui_temperature       = 0.7
+        self.coqui_speed             = 1.0
+        self.coqui_stream_chunk_size = 350
+        self.selected_coqui_sample   = ""
+
+        # === Threading primitives ===
+        self.tts_queue     = queue.Queue()
+        self.tts_event     = threading.Event()   # === Shutdown signal ===
+        self.stop_tts_flag = threading.Event()   # === Interrupt current playback ===
+        self.tts_lock      = threading.Lock()
+        self.tts_active    = False
+
+        # === PyAudio stream reference (for stop_playback) ===
+        self.current_tts_stream = None
+
+    # ==================
+    # === PUBLIC API ===
+    # ==================
+
+    def start(self):
+        """Start the TTS worker thread."""
+        self.tts_thread = threading.Thread(target=self.tts_worker, daemon=True)
+        self.tts_thread.start()
+        logging.info("TTS worker thread started.")
+
+    def stop(self):
+        """Graceful shutdown — signal worker thread to exit."""
+        self.tts_event.set()
+        self.tts_queue.put(None)
+
+    def speak(self, text, completion_event=None):
+        """
+        Queue text for TTS playback.
+
+        Args:
+            text             : str — text to speak
+            completion_event : threading.Event | None
+                               If provided, .set() called after full playback + drain.
+                               Pass None for fire-and-forget (e.g. manual text input).
+        """
+        self.tts_queue.put((text, completion_event))
+
+    def stop_playback(self):
+        """Interrupt current TTS playback immediately (barge-in / user interrupt)."""
+        self.stop_tts_flag.set()
+
+        # === Flush pending queue ===
+        with self.tts_queue.mutex:
+            self.tts_queue.queue.clear()
+
+        # === Stop PyAudio stream ===
+        with self.tts_lock:
+            if self.current_tts_stream and self.current_tts_stream.is_active():
+                try:
+                    self.current_tts_stream.stop_stream()
+                except:
+                    pass
+
+        self.tts_active = False
+        self.vu_output_signal.emit(0)
+        logging.info("TTS stop signal sent.")
+
+    def invalidate_latents(self):
+        """Force recalculation of speaker latents on next synthesis (call on voice sample change)."""
+        self.speaker_latents = None
+
+    def load_samples(self):
+        """Return list of available .wav sample names from COQUI_SAMPLES_DIR."""
+        try:
+            if not os.path.exists(COQUI_SAMPLES_DIR):
+                raise FileNotFoundError(f"Coqui samples directory not found: {COQUI_SAMPLES_DIR}")
+            samples      = glob.glob(os.path.join(COQUI_SAMPLES_DIR, "*.wav"))
+            sample_names = [os.path.basename(s) for s in samples]
+            logging.info(f"Coqui samples loaded: {sample_names}")
+            return sample_names
+        except Exception as e:
+            logging.error(f"Coqui load_samples error: {str(e)}")
+            return []
+
+    def release_gpu_memory(self):
+        """Unload model and free VRAM."""
+        if self.coqui_model is not None:
+            del self.coqui_model
+            self.coqui_model     = None
+            self.speaker_latents = None
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            logging.info("TTS GPU memory released.")
+
+    # ================================
+    # === INTERNAL — WORKER THREAD ===
+    # ================================
+
+    def tts_worker(self):
+        p      = None
+        stream = None
+        PLAYBACK_CHUNK = 1024
+        SAMPLE_RATE    = 24000
+
+        try:
+            p = pyaudio.PyAudio()
+            output_device_index = self.get_output_device()
+
+            # === frames_per_buffer forces stream.write() to block for actual audio duration ===
+            stream = p.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=SAMPLE_RATE,
+                output=True,
+                output_device_index=output_device_index,
+                frames_per_buffer=PLAYBACK_CHUNK
+            )
+            self.current_tts_stream = stream
+            logging.info("TTS Stream initialized.")
+
+            while not self.tts_event.is_set():
+                completion_event = None
+                try:
+                    item = self.tts_queue.get(timeout=0.1)
+                    if item is None:
+                        break
+                    text, completion_event = item
+
+                    if self.stop_tts_flag.is_set():
+                        self.stop_tts_flag.clear()
+                        if completion_event: completion_event.set()
+                        continue
+
+                    self.tts_active = True
+                    self.stop_tts_flag.clear()
+                    logging.info(f"Processing TTS: {text[:70]}...")
+
+                    if not stream.is_active():
+                        stream.start_stream()
+
+                    # === Load model if not in memory ===
+                    self._ensure_model_loaded()
+
+                    # === Recalculate latents if voice sample changed ===
+                    self._ensure_latents()
+
+                    # === Generate audio stream ===
+                    text_for_tts = emoji.demojize(text)
+                    language     = self.get_language()
+                    if language == "auto":
+                        language = "en"
+
+                    audio_chunks = self.coqui_model.inference_stream(
+                        text=text_for_tts,
+                        language=language,
+                        gpt_cond_latent=self.speaker_latents[0],
+                        speaker_embedding=self.speaker_latents[1],
+                        stream_chunk_size=self.coqui_stream_chunk_size,
+                        temperature=self.coqui_temperature,
+                        enable_text_splitting=True,
+                        speed=self.coqui_speed
+                    )
+
+                    # === Playback queue — decouples GPU generation from audio playback ===
+                    playback_queue = queue.Queue(maxsize=0)
+                    playback_done  = threading.Event()
+
+                    def playback_thread_func():
+                        try:
+                            while True:
+                                chunk = playback_queue.get()
+
+                                if chunk is None:  # === Sentinel — end of audio ===
+                                    break
+
+                                if self.stop_tts_flag.is_set():
+                                    # === Flush remaining chunks and exit immediately ===
+                                    while not playback_queue.empty():
+                                        try: playback_queue.get_nowait()
+                                        except: pass
+                                    break
+
+                                # === Emit VU BEFORE write — synchronized with actual playback ===
+                                audio_float = chunk.astype(np.float32) / 32768.0
+                                rms         = np.sqrt(np.mean(audio_float ** 2))
+                                level       = min(int(rms * 100), 14)
+                                self.vu_output_signal.emit(level)
+
+                                with self.tts_lock:
+                                    if stream.is_stopped(): stream.start_stream()
+                                    stream.write(chunk.tobytes())
+
+                        except Exception as e:
+                            logging.error(f"Playback thread error: {e}")
+                        finally:
+                            # === Guaranteed — playback_done always set even on exception ===
+                            playback_done.set()
+
+                    pb_thread = threading.Thread(target=playback_thread_func, daemon=True)
+                    pb_thread.start()
+
+                    # === GPU generates chunks and feeds the playback queue ===
+                    for audio_chunk in audio_chunks:
+                        if self.stop_tts_flag.is_set():
+                            logging.info("TTS interrupted.")
+                            break
+
+                        audio_data_full = (audio_chunk.squeeze().cpu().numpy() * 32767).astype(np.int16)
+                        volume_factor   = self.get_volume() / 100.0
+                        audio_data_full = (audio_data_full * volume_factor).astype(np.int16)
+
+                        for i in range(0, len(audio_data_full), PLAYBACK_CHUNK):
+                            if self.stop_tts_flag.is_set():
+                                break
+                            playback_queue.put(audio_data_full[i:i + PLAYBACK_CHUNK])
+
+                    # === Send sentinel — signals end of generation ===
+                    playback_queue.put(None)
+
+                    # === Wait for playback thread to fully finish ===
+                    if not playback_done.wait(timeout=45):
+                        logging.warning("Playback timeout!")
+
+                    # === Final hardware buffer drain ===
+                    with self.tts_lock:
+                        if stream and stream.is_active():
+                            try:
+                                stream.stop_stream()
+                                time.sleep(0.1)  # === Small hardware drain margin ===
+                                stream.start_stream()
+                            except:
+                                pass
+
+                except queue.Empty:
+                    continue
+                except Exception as e:
+                    logging.error(f"TTS Error: {str(e)}")
+                    self.coqui_model = None  # === Force model reload on next request ===
+                finally:
+                    self.tts_active = False
+                    self.stop_tts_flag.clear()
+                    self.vu_output_signal.emit(0)
+                    # === completion_event.set() called AFTER full hardware drain ===
+                    if completion_event is not None:
+                        completion_event.set()
+                        logging.info("TTS completion signaled — audio fully played.")
+
+        except Exception as e:
+            logging.error(f"Critical TTS Worker Error: {str(e)}")
+        finally:
+            with self.tts_lock:
+                if stream:
+                    try:
+                        stream.stop_stream()
+                        stream.close()
+                    except:
+                        pass
+                if p:
+                    p.terminate()
+
+    # ========================
+    # === INTERNAL HELPERS ===
+    # ========================
+
+    def _ensure_model_loaded(self):
+        """Load XTTS model if not already in memory."""
+        if self.coqui_model is None:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            config = XttsConfig()
+            config.load_json(os.path.join(COQUI_MODELS_DIR, "config.json"))
+            self.coqui_model = Xtts.init_from_config(config)
+            self.coqui_model.load_checkpoint(config, checkpoint_dir=COQUI_MODELS_DIR, eval=True)
+            self.coqui_model.to(self.coqui_device)
+            logging.info("XTTS Model Loaded.")
+
+    def _ensure_latents(self):
+        """Calculate speaker latents if not cached."""
+        if self.speaker_latents is None:
+            speaker_wav                        = os.path.join(COQUI_SAMPLES_DIR, self.selected_coqui_sample)
+            gpt_cond_latent, speaker_embedding = self.coqui_model.get_conditioning_latents(audio_path=[speaker_wav])
+            self.speaker_latents               = (gpt_cond_latent, speaker_embedding)
+            logging.info(f"XTTS Latents Recalculated for: {self.selected_coqui_sample}")
+
+
+class LLMClient:
+    """
+    === LLMClient — LM Studio + MCP Communication Engine ===
+    === Handles: LLM queries, MCP JSON-RPC 2.0, tool chain execution ===
+    === Fully decoupled from GUI via callbacks and config_getter ===
+    """
+
+    def __init__(self,
+                 show_warning_signal,
+                 append_log_callback,
+                 get_system_prompt,
+                 get_recent_conv,
+                 query_rag_callback,
+                 on_mcp_connected_callback,
+                 config_getter):
+        """
+        Args:
+            show_warning_signal        : pyqtSignal(str, str) — thread-safe warning dialog
+            append_log_callback        : callable(role, text, visible=True) — chat history log
+            get_system_prompt          : callable() -> str — current system prompt text
+            get_recent_conv            : callable(max_pairs) -> str — recent conversation context
+            query_rag_callback         : callable(query, top_k, recent_lines) -> str — RAG query
+            on_mcp_connected_callback  : callable(mcp_system_prompt) — called after MCP connects, updates GUI
+            config_getter              : callable() -> dict — all LLM/MCP config params
+        """
+        # === Callbacks & signals ===
+        self.show_warning          = show_warning_signal
+        self.append_log            = append_log_callback
+        self.get_system_prompt     = get_system_prompt
+        self.get_recent_conv       = get_recent_conv
+        self.query_rag             = query_rag_callback
+        self.on_mcp_connected      = on_mcp_connected_callback
+        self.get_config            = config_getter
+
+        # === Internal state ===
+        self.mcp_connected         = False
+        self.mcp_system_prompt     = None
+        self.mcp_request_id        = 0
+        self.mcp_server_process    = None  # === Headless MCP server subprocess ===
+
+    # =========================
+    # === LM STUDIO QUERIES ===
+    # =========================
+
+    def query(self, prompt):
+        """
+        Main LLM query — injects system prompt, RAG memory and recent context.
+        Used for all standard user interactions.
+        """
+        logging.info("Thinking: Processing prompt with LM Studio")
+
+        cfg = self.get_config()
+
+        if not cfg["model"] or "No loaded models" in cfg["model"]:
+            logging.warning("Query aborted: No model loaded.")
+            self.show_warning.emit(
+                "LM Studio Warning",
+                "Warning: No models loaded.\nPlease load a model in LM Studio to proceed."
+            )
+            return None
+
+        try:
+            system_prompt  = self.get_system_prompt()
+            memory_context = ""
+
+            if cfg["rag_memory_enabled"]:
+                # === RECENT: always 3 pairs for continuity ===
+                recent_context = self.get_recent_conv(max_pairs=3)
+
+                # === Build dedup set from recent ===
+                recent_lines = set()
+                if recent_context:
+                    for line in recent_context.splitlines():
+                        text = line.split(": ", 1)[-1].strip().lower()[:80]
+                        if text:
+                            recent_lines.add(text)
+
+                # === RAG: 2 extra pairs, deduplicated ===
+                rag_context = self.query_rag(prompt, top_k=4, recent_lines=recent_lines)
+
+                if rag_context:
+                    memory_context += "=== SEMANTIC MEMORY ===\n"
+                    memory_context += rag_context + "\n\n"
+                    logging.info("📚 RAG: 2 semantic pairs injected (deduplicated)")
+
+                if recent_context:
+                    memory_context += "=== RECENT CONTEXT ===\n"
+                    memory_context += recent_context + "\n"
+                    logging.info("🕐 Recent: 3 pairs injected (continuity)")
+
+            else:
+                # === RAG OFF: only 3 recent pairs ===
+                recent_context = self.get_recent_conv(max_pairs=3)
+                if recent_context:
+                    memory_context += "=== RECENT CONVERSATION ===\n"
+                    memory_context += recent_context + "\n"
+                    logging.info("🕐 Recent: 3 pairs injected (RAG disabled)")
+
+            # === Inject memory into system prompt ===
+            if memory_context:
+                system_prompt += f"\n\n{memory_context}"
+
+            # === Inject thinking flag ===
+            if cfg["thinking_enabled"]:
+                prompt = "/think\n" + prompt
+            else:
+                prompt = "/no_think\n" + prompt
+
+            # === Debug logging ===
+            logging.debug("=" * 60)
+            logging.debug(f"📤 USER PROMPT:\n{prompt}")
+            logging.debug("=" * 60)
+
+            base_url = cfg["lm_server"].rstrip('/')
+            chat_url = f"{base_url}/v1/chat/completions"
+
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": prompt}
+            ]
+
+            payload = {
+                "model":              cfg["model"],
+                "messages":           messages,
+                "temperature":        cfg["temperature"],
+                "max_tokens":         max(cfg["max_tokens"], 512),
+                "top_k":              cfg["top_k"],
+                "repetition_penalty": cfg["repetition_penalty"],
+                "min_p":              cfg["min_p"],
+                "top_p":              cfg["top_p"]
+            }
+
+            response = requests.post(chat_url, json=payload)
+            if response.status_code != 200:
+                logging.error(f"LM Studio HTTP {response.status_code}: {response.text[:500]}")
+                return None
+
+            data = response.json()
+            return data['choices'][0]['message']['content'].strip()
+
+        except Exception as e:
+            logging.error(f"LM Studio error: {str(e)}")
+            self.show_warning.emit("LM Studio Error", f"Communication error:\n{str(e)}")
+            return None
+
+    def query_chain(self, follow_up_prompt):
+        """
+        Dedicated LLM call for MCP chain execution.
+        No system prompt, no memory context — clean focused call.
+        """
+        logging.info("Thinking: MCP chain follow-up query")
+
+        cfg = self.get_config()
+
+        if not cfg["model"] or "No loaded models" in cfg["model"]:
+            logging.warning("Chain query aborted: No model loaded.")
+            return None
+
+        try:
+            # === Inject thinking flag ===
+            if cfg["thinking_enabled"]:
+                follow_up_prompt = "/think\n" + follow_up_prompt
+            else:
+                follow_up_prompt = "/no_think\n" + follow_up_prompt
+
+            base_url = cfg["lm_server"].rstrip('/')
+            chat_url = f"{base_url}/v1/chat/completions"
+
+            messages = [{"role": "user", "content": follow_up_prompt}]
+
+            payload = {
+                "model":              cfg["model"],
+                "messages":           messages,
+                "temperature":        cfg["temperature"],
+                "max_tokens":         max(cfg["max_tokens"], 512),
+                "top_k":              cfg["top_k"],
+                "repetition_penalty": cfg["repetition_penalty"],
+                "min_p":              cfg["min_p"],
+                "top_p":              cfg["top_p"]
+            }
+
+            response = requests.post(chat_url, json=payload)
+            response.raise_for_status()
+            data = response.json()
+            return data['choices'][0]['message']['content'].strip()
+
+        except Exception as e:
+            logging.error(f"Chain LLM error: {str(e)}")
+            return None
+
+    # ===============================
+    # === MCP JSON-RPC 2.0 CLIENT ===
+    # ===============================
+
+    def mcp_request(self, method, params=None):
+        """Low-level JSON-RPC 2.0 request — no business logic."""
+        try:
+            cfg = self.get_config()
+            base_url = cfg["mcp_server"].rstrip('/')
+            self.mcp_request_id += 1
+
+            payload = {
+                "jsonrpc": "2.0",
+                "id":      self.mcp_request_id,
+                "method":  method,
+                "params":  params if params else {}
+            }
+
+            logging.debug(f"[MCP →] id={self.mcp_request_id} method={method}\n"
+                          f"        params={json.dumps(params, indent=2, ensure_ascii=False) if params else '{}'}")
+
+            response = requests.post(base_url, json=payload, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+
+            if "error" in data:
+                logging.debug(f"[MCP ←] id={self.mcp_request_id} ERROR:\n"
+                              f"        {json.dumps(data['error'], indent=2, ensure_ascii=False)}")
+                logging.error(f"❌ MCP Error: {data['error']['message']}")
+                return None
+
+            logging.debug(f"[MCP ←] id={self.mcp_request_id} method={method} OK\n"
+                          f"        result={json.dumps(data.get('result'), indent=2, ensure_ascii=False)}")
+
+            return data.get("result")
+
+        except Exception as e:
+            logging.debug(f"[MCP ✗] id={self.mcp_request_id} method={method} EXCEPTION: {e}")
+            logging.error(f"🔴 MCP request failed: {str(e)}")
+            return None
+
+    def mcp_request_with_retry(self, method, params=None, retries=3, delay=1):
+        """MCP request with retry logic."""
+        for attempt in range(retries):
+            try:
+                result = self.mcp_request(method, params)
+                if result:
+                    return result
+                if attempt < retries - 1:
+                    logging.warning(f"⚠️ MCP request failed (attempt {attempt+1}/{retries}), retrying in {delay}s...")
+                    time.sleep(delay)
+            except Exception as e:
+                if attempt < retries - 1:
+                    logging.warning(f"⚠️ MCP request error (attempt {attempt+1}/{retries}): {e}, retrying...")
+                    time.sleep(delay)
+                else:
+                    logging.error(f"❌ MCP request failed after {retries} attempts: {e}")
+        return None
+
+    def initialize_mcp_connection(self):
+        """Connect to MCP server and fetch system prompt."""
+        try:
+            cfg = self.get_config()
+            logging.info("🔄 Connecting to MCP server...")
+
+            # === Step 1: Initialize ===
+            init_result = self.mcp_request_with_retry("initialize", {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {}},
+                "clientInfo": {"name": "Advanced-STS-Local-AI-Assistant", "version": "0.1.7 Beta"}
+            })
+
+            if not init_result:
+                raise Exception("Initialize failed")
+
+            # === Step 2: Get system prompt ===
+            prompt_result = self.mcp_request_with_retry("prompts/get", {
+                "name": "assistant_system_prompt"
+            })
+
+            if not prompt_result:
+                raise Exception("Failed to get system prompt")
+
+            messages = prompt_result.get("messages", [])
+            if messages:
+                self.mcp_system_prompt = messages[0]["content"]["text"]
+                self.mcp_connected     = True
+                logging.info(f"✅ MCP connected ({len(self.mcp_system_prompt)} chars prompt)")
+
+                # === Notify GUI to update prompt_text ===
+                self.on_mcp_connected(self.mcp_system_prompt)
+                return True
+
+            raise Exception("No prompt in response")
+
+        except Exception as e:
+            logging.error(f"❌ MCP connection failed: {str(e)}")
+            self.mcp_connected = False
+            cfg = self.get_config()
+            self.show_warning.emit(
+                "MCP Connection Failed",
+                f"Could not connect to MCP server:\n{str(e)}\n\n"
+                f"Server: {cfg['mcp_server']}\n\n"
+                f"MCP features will be disabled."
+            )
+            return False
+
+    def start_mcp_server_headless(self):
+        """Start MCP server as background subprocess."""
+        try:
+            if self.mcp_server_process and self.mcp_server_process.poll() is None:
+                logging.info("[MCP] Server already running")
+                return
+
+            if not os.path.exists(MCP_SERVER_FILE):
+                logging.error(f"[MCP] Server file not found: {MCP_SERVER_FILE}")
+                return
+
+            self.mcp_server_process = subprocess.Popen(
+                [sys.executable, MCP_SERVER_FILE, "--no-gui"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            logging.info(f"[MCP] Headless server started (PID: {self.mcp_server_process.pid})")
+            time.sleep(2)
+
+        except Exception as e:
+            logging.error(f"[MCP] Failed to start server: {str(e)}")
+
+    def stop_mcp_server_headless(self):
+        """Stop MCP server subprocess."""
+        if self.mcp_server_process:
+            try:
+                self.mcp_server_process.terminate()
+                self.mcp_server_process.wait(timeout=5)
+                logging.info("[MCP] Headless server stopped")
+            except Exception as e:
+                logging.error(f"[MCP] Error stopping server: {str(e)}")
+            finally:
+                self.mcp_server_process = None
+
+    # ==========================
+    # === MCP CHAIN EXECUTOR ===
+    # ==========================
+
+    def mcp_chain_executor(self, user_query, initial_response):
+        """
+        Multi-step tool calling loop.
+        Executes tools, feeds results back to LLM until final text answer.
+        """
+        if not self.mcp_connected:
+            logging.warning("⚠️ MCP not connected, returning initial response")
+            return self.extract_text_response(initial_response)
+
+        logging.info("🔗 Starting MCP chain execution...")
+
+        cfg = self.get_config()
+
+        conversation = [
+            {"role": "user",      "content": user_query},
+            {"role": "assistant", "content": initial_response}
+        ]
+
+        # === Safe defaults — prevents UnboundLocalError on early exit ===
+        clean_response = ""
+        results        = []
+
+        for iteration in range(cfg["mcp_max_iterations"]):
+            logging.info(f"🔄 MCP Iteration {iteration+1}/{cfg['mcp_max_iterations']}")
+
+            last_response = conversation[-1]["content"]
+            tool_calls    = self.parse_tool_calls(last_response)
+
+            if not tool_calls:
+                logging.info("✅ MCP chain complete - no more tool calls")
+                break
+
+            logging.info(f"🔧 Executing {len(tool_calls)} tool(s)...")
+            results = []
+
+            for idx, tool_call in enumerate(tool_calls, 1):
+                logging.info(f"\n📋 Tool Call #{idx}:")
+                logging.info(json.dumps(tool_call, indent=2, ensure_ascii=False))
+
+                self.append_log("MCP Request",  json.dumps(tool_call, ensure_ascii=False), visible=False)
+
+                result = self.execute_mcp_tool(tool_call)
+
+                self.append_log("MCP Response", json.dumps(result, ensure_ascii=False), visible=False)
+
+                results.append({"tool": tool_call.get("tool"), "result": result})
+
+                status = "✅" if result.get("ok") else "❌"
+                logging.info(f"  {status} Executed: {tool_call.get('tool')}\n")
+
+            follow_up_prompt = self.build_mcp_follow_up_prompt(user_query, results)
+            next_response    = self.query_chain(follow_up_prompt)
+
+            if not next_response:
+                logging.error("❌ AI returned None, stopping chain")
+                break
+
+            conversation.append({"role": "user",      "content": follow_up_prompt})
+            conversation.append({"role": "assistant", "content": next_response})
+
+        # === Extract final clean text response ===
+        final_response = conversation[-1]["content"]
+        clean_response = self.extract_text_response(final_response)
+
+        if not clean_response and results:
+            last_result = results[-1]
+            tool_name   = last_result.get("tool", "")
+            result_data = last_result.get("result", {})
+            if result_data.get("ok"):
+                clean_response = f"Done — {tool_name} completed successfully."
+            else:
+                clean_response = f"Something went wrong with {tool_name}."
+        elif not clean_response:
+            clean_response = "Done."
+
+        logging.info(f"✅ MCP chain finished after {len(conversation)//2} iterations")
+        return clean_response
+
+    def build_mcp_follow_up_prompt(self, original_query, tool_results):
+        """Build follow-up prompt from Tool Chain Rules.md template."""
+        results_text = ""
+        for item in tool_results:
+            tool_name = item['tool']
+            result    = item['result']
+            if result.get("ok"):
+                results_text += f"\n✅ {tool_name}:\n{json.dumps(result.get('data', result), indent=2)}\n"
+            else:
+                results_text += f"\n❌ {tool_name} FAILED:\n{result.get('error', 'Unknown error')}\n"
+
+        rules_path = os.path.join(BASE_DIR, "MCP", "Tool Chain Rules.md")
+        template   = open(rules_path, "r", encoding="utf-8").read()
+        template   = template.replace("\\_", "_")
+
+        # === Use replace() — avoids conflicts with JSON braces in template ===
+        prompt = template
+        prompt = prompt.replace("{separator}",      "=" * 60)
+        prompt = prompt.replace("{original_query}", original_query)
+        prompt = prompt.replace("{results_text}",   results_text)
+        return prompt
+
+    def execute_mcp_tool(self, tool_call):
+        """Execute a single MCP tool call via JSON-RPC."""
+        try:
+            tool_name = tool_call.get("tool", "")
+            arguments = tool_call.get("arguments", {})
+
+            logging.info(f"🔧 Calling MCP tool: {tool_name}")
+
+            result = self.mcp_request("tools/call", {
+                "name":      tool_name,
+                "arguments": arguments
+            })
+
+            if not result:
+                return {"ok": False, "error": "MCP request failed"}
+
+            content_blocks = result.get("content", [])
+            if content_blocks:
+                text_content = content_blocks[0].get("text", "")
+                try:
+                    data = json.loads(text_content)
+                    if isinstance(data, dict):
+                        return data
+                    elif isinstance(data, list):
+                        return {"ok": True, "data": data}
+                    else:
+                        return {"ok": True, "data": data}
+                except json.JSONDecodeError:
+                    return {"ok": True, "data": text_content}
+
+            return {"ok": False, "error": "No content in response"}
+
+        except Exception as e:
+            logging.error(f"🔴 Tool execution error: {str(e)}")
+            return {"ok": False, "error": str(e)}
+
+    # ============================
+    # === JSON PARSING HELPERS ===
+    # ============================
+
+    def extract_json_blocks(self, text: str):
+        """Extract complete JSON objects from text using brace matching."""
+        blocks = []
+        stack  = 0
+        start  = None
+
+        for i, ch in enumerate(text):
+            if ch == "{":
+                if stack == 0:
+                    start = i
+                stack += 1
+            elif ch == "}":
+                stack -= 1
+                if stack == 0 and start is not None:
+                    blocks.append(text[start:i+1])
+                    start = None
+        return blocks
+
+    def sanitize_json_string(self, s: str) -> str:
+        """Clean up common LLM JSON formatting issues."""
+        s = s.strip()
+        # === Remove markdown code blocks ===
+        if s.startswith("```"):
+            lines = s.split("\n")
+            s = "\n".join(lines[1:] if lines[0].startswith("```") else lines)
+        if s.endswith("```"):
+            s = s[:-3].strip()
+        # === Remove trailing commas before } or ] ===
+        import re
+        s = re.sub(r',\s*([}\]])', r'\1', s)
+        return s
+
+    def validate_and_parse_json(self, block: str):
+        """Parse JSON block with sanitization fallback."""
+        try:
+            return json.loads(block)
+        except json.JSONDecodeError:
+            try:
+                return json.loads(self.sanitize_json_string(block))
+            except json.JSONDecodeError:
+                return None
+
+    def parse_tool_calls(self, response: str):
+        """Extract valid tool calls from LLM response."""
+        if not response:
+            return []
+
+        tool_calls = []
+        blocks     = self.extract_json_blocks(response)
+
+        for block in blocks:
+            parsed = self.validate_and_parse_json(block)
+            if not parsed:
+                continue
+            if "tool" in parsed and "arguments" in parsed:
+                if "id" not in parsed:
+                    parsed["id"] = f"call_{len(tool_calls)+1}"
+                tool_calls.append(parsed)
+
+        if tool_calls:
+            logging.info(f"✅ Parsed tool call: {tool_calls[0].get('tool')} (id: {tool_calls[0].get('id')})")
+            logging.info(f"📦 Total tool calls parsed: {len(tool_calls)}")
+
+        return tool_calls
+
+    def extract_text_response(self, response):
+        """Remove JSON tool calls from response, return clean text."""
+        json_blocks = self.extract_json_blocks(response)
+        clean_text  = response
+        for block in json_blocks:
+            clean_text = clean_text.replace(block, "")
+        clean_text = " ".join(clean_text.split()).strip()
+        return clean_text if clean_text else ""
+
+
 class AIAssistantGUI(QMainWindow):
     # ===== THREAD SAFETY SIGNALS =====
     show_warning_signal  = pyqtSignal(str, str)
@@ -367,7 +2187,7 @@ class AIAssistantGUI(QMainWindow):
         super().__init__()
         
         # ====== INITIALIZE GUI ======
-        self.setWindowTitle("= Advanced STS Local AI Assistant 0.1.6 Beta =")
+        self.setWindowTitle("= Advanced STS Local AI Assistant 0.1.7 Beta =")
         self.setGeometry(0, 0, 1326, 663)
         self.setFixedSize(1326, 663)
         
@@ -402,22 +2222,11 @@ class AIAssistantGUI(QMainWindow):
         self.vad_device = "cuda" if torch.cuda.is_available() else "cpu"
         self.is_recording = False
         self.audio_thread = None
-        self.stop_event = threading.Event()
-        self.stop_tts_flag = threading.Event()
-        self.resume_event = threading.Event()
-        self.resume_event.set()
-        self.audio_stream = None
-        self.audio_pyaudio = None
         self.audio_data = None
         self.whisper_language = "en" 
         self.whisper_device = "cuda" if torch.cuda.is_available() else "cpu"  
         self.whisper_model = "small"
-        self.faster_whisper_model = None
         self.whisper_compute_type = "int8"  # === Set int8/float16/float32 depending on your hardware support ===
-        self.current_whisper_device = self.whisper_device
-        self.current_whisper_model = None  # === Track current loaded model name ===
-        self.coqui_device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.current_tts_stream = None
         self.chat_text = None
         self.debug_text = None
         self.vu_level_input = 0
@@ -425,33 +2234,19 @@ class AIAssistantGUI(QMainWindow):
         self.wake_word = "Jarvis"
         self.wake_word_enabled = False
         self.use_mcp_server = False
-        self.mcp_system_prompt = None     
-        self.mcp_connected = False        
-        self.mcp_server_process = None  # === Headless MCP server subprocess ===
+        # === MCP state owned by self.llm (LLMClient) ===
         self.mcp_request_id = 0           
         self.mcp_max_iterations = 5       
         self.real_talk_enabled = False
         self.rag_memory_enabled = False
-        self.rag_embedder = None
-        self.rag_client = None
-        self.rag_collection = None
         self.current_profile_name = None  # === No profile loaded => using Jarvis (default) ===
         self.profile_modified = False     # === Dirty flag — True when unsaved changes exist ===
         self.current_chat_log = CHAT_LOG  # === Starts Generic ===
         self.current_rag_dir = os.path.join(RAG_DATABASE_DIR, "Jarvis")  # === Jarvis is the default profile with hardcoded settings ===
-        self.rag_queue = queue.Queue()
-        self.rag_event = threading.Event()
-        self.rag_thread = None
-        self.tts_active = False
-        self.current_whisper_model = None
-        self.current_whisper_device = self.whisper_device
-        self.current_coqui_device = self.coqui_device
+        self.current_coqui_device = "cuda" if torch.cuda.is_available() else "cpu"
         self.current_vad_device = self.vad_device
         self.lm_server = "http://127.0.0.1:1234"
         self.mcp_server = "http://127.0.0.1:8765"
-        self.coqui_model = None
-        self.coqui_model_name = "tts_models/multilingual/multi-dataset/xtts_v2"
-        self.vad_model = None
         self.chat_history = []
         self.image_references = []
         self.temperature = 0.7
@@ -461,17 +2256,61 @@ class AIAssistantGUI(QMainWindow):
         self.min_p = 0.05
         self.top_p = 0.95
         self.thinking_enabled = False  # === Think/No Think flag for LLM calls ===
-        self.recording_paused = False
-        self.tts_lock = threading.Lock()
-        self.speaker_latents = None
-        self.tts_queue = queue.Queue()
-        self.tts_event = threading.Event()
-        self.init_silero_vad()
+
+        # === TTSEngine — handles all Coqui TTS generation and playback ===
+        self.tts = TTSEngine(
+            vu_output_signal     = self.vu_output_signal,
+            volume_getter        = lambda: self.volume_level,
+            language_getter      = lambda: self.whisper_language,
+            output_device_getter = self._get_tts_output_device_index
+        )
+
+        # === ProfileManager — handles profile JSON I/O and path management ===
+        self.profiles = ProfileManager(
+            settings_dir      = SETTINGS_DIR,
+            history_dir       = HISTORY_DIR,
+            rag_database_dir  = RAG_DATABASE_DIR
+        )
+
+        # === RAGManager — handles ChromaDB semantic memory and recent conversation ===
+        self.rag = RAGManager(
+            show_warning_signal = self.show_warning_signal,
+            get_chat_history    = lambda: self.chat_history,
+            config_getter       = self._get_rag_config
+        )
+
+        # === LLMClient — handles LM Studio queries, MCP and tool chain execution ===
+        self.llm = LLMClient(
+            show_warning_signal       = self.show_warning_signal,
+            append_log_callback       = self.append_log,
+            get_system_prompt         = lambda: self.prompt_text.toPlainText().strip(),
+            get_recent_conv           = self.rag.get_recent_conversation,
+            query_rag_callback        = self.rag.query,
+            on_mcp_connected_callback = self._on_mcp_connected,
+            config_getter             = self._get_llm_config
+        )
+
+        # === AudioProcessor — handles VAD, microphone capture and Whisper STT ===
+        self.audio = AudioProcessor(
+            vu_input_signal    = self.vu_input_signal,
+            on_speech_detected = self.process_audio_segment,
+            stop_tts_callback  = self.stop_tts_stream,
+            is_tts_active      = lambda: self.tts.tts_active,
+            is_real_talk       = lambda: self.real_talk_enabled,
+            show_error_signal  = self.show_warning_signal,
+            config_getter      = self._get_audio_config
+        )
+        self.audio.init_silero_vad()
         self.create_gui()
         self.setup_debug_logging()
-        self.load_mics()
-        self.load_output_devices()
-        self.load_coqui_samples()
+        self._load_audio_devices()
+        self._load_audio_devices()
+        # === Load TTS voice samples into dropdown ===
+        samples = self.tts.load_samples()
+        if hasattr(self, 'coqui_dropdown'):
+            self.coqui_dropdown.addItems(samples)
+            if samples:
+                self.tts.selected_coqui_sample = samples[0]
         
         # === We use Timer to not block the GUI at startup ===
         QTimer.singleShot(500, self.load_lm_models)
@@ -483,13 +2322,8 @@ class AIAssistantGUI(QMainWindow):
         # === No explicit call here — would cause double init on startup ===
         logging.info("Starting application")
 
-        self.tts_thread = threading.Thread(target=self.tts_worker, daemon=True)
-        self.tts_thread.start()
-        logging.info("TTS worker thread started.")
-        self.init_rag_system()
-        self.rag_thread = threading.Thread(target=self.rag_worker, daemon=True)
-        self.rag_thread.start()
-        logging.info("RAG worker thread started.")
+        self.tts.start()
+        self.rag.start()
 
         # === System Monitor — dedicated worker thread, 0.5s refresh ===
         self.monitor_worker = SystemMonitorWorker()
@@ -1061,13 +2895,13 @@ class AIAssistantGUI(QMainWindow):
 
         self.radio_think_on = QRadioButton("On", lm_frame)
         self.radio_think_on.setGeometry(240, 20, 40, 20)
-        self.radio_think_on.setStyleSheet
+        self.radio_think_on.setStyleSheet("color: #FFFFF;")
         self.radio_think_on.toggled.connect(lambda checked: setattr(self, 'thinking_enabled', True) if checked else None)
         self.thinking_group.addButton(self.radio_think_on, 0)
 
         self.radio_think_off = QRadioButton("Off", lm_frame)
         self.radio_think_off.setGeometry(280, 20, 45, 20)
-        self.radio_think_off.setStyleSheet
+        self.radio_think_off.setStyleSheet("color: #FFFFFF;")
         self.radio_think_off.toggled.connect(lambda checked: setattr(self, 'thinking_enabled', False) if checked else None)
         self.thinking_group.addButton(self.radio_think_off, 1)
         self.radio_think_off.setChecked(True)  # === Default: No Think ===
@@ -1547,22 +3381,22 @@ class AIAssistantGUI(QMainWindow):
         self.top_p_value_label.setText(f"{self.top_p:.2f}")
 
     def update_coqui_sample(self, text):
-        self.selected_coqui_sample = text
-        # === Reset latents cache ===
-        self.speaker_latents = None
+        self.tts.selected_coqui_sample = text
+        self.tts.invalidate_latents()
         logging.info(f"Coqui sample changed to: {text} (Cache cleared)")
 
     def on_device_change(self, device_type, device):
         if device_type == "whisper":
             self.whisper_device = device
-            self.current_whisper_device = device
+            self.audio.current_whisper_device = device
         elif device_type == "vad":
             self.vad_device = device
             self.current_vad_device = device
-            self.init_silero_vad()
+            self.audio.init_silero_vad()
         elif device_type == "coqui":
-            self.coqui_device = device
+            self.tts.coqui_device = device
             self.current_coqui_device = device
+            self.tts.invalidate_latents()
 
     def setup_debug_logging(self):
         self.log_emitter = LogEmitter()
@@ -1597,33 +3431,77 @@ class AIAssistantGUI(QMainWindow):
         self.chat_text.setTextCursor(cursor)
         self.chat_text.verticalScrollBar().setValue(self.chat_text.verticalScrollBar().maximum())
 
-    def cleanup_audio_resources(self):
-        with contextlib.suppress(Exception):
-            if self.audio_stream and self.audio_stream.is_active():
-                self.audio_stream.stop_stream()
-                self.audio_stream.close()
-        with contextlib.suppress(Exception):
-            if self.audio_pyaudio:
-                self.audio_pyaudio.terminate()
-        self.audio_stream = None
-        self.audio_pyaudio = None
-
     def stop_tts_stream(self):
-        self.stop_tts_flag.set()
-        with self.tts_queue.mutex:
-            self.tts_queue.queue.clear()
-        
-        with self.tts_lock:
-            if self.current_tts_stream and self.current_tts_stream.is_active():
-                try:
-                    self.current_tts_stream.stop_stream()
-                except:
-                    pass
-
-        self.tts_active = False
-        logging.info("TTS stop signal sent.")
+        self.tts.stop_playback()
         QApplication.processEvents()
-        self.vu_output_signal.emit(0)
+
+    def _get_tts_output_device_index(self):
+        # === Returns output device index for TTSEngine ===
+        try:
+            output_device_str = self.output_device_dropdown.currentText()
+            if "No output" in output_device_str:
+                return None
+            return int(output_device_str.split(":")[0])
+        except:
+            return None
+
+    def _get_llm_config(self):
+        # === Returns current LLM/MCP config dict for LLMClient ===
+        return {
+            "model":              self.selected_lm_model,
+            "lm_server":          self.lm_server,
+            "mcp_server":         self.mcp_server,
+            "temperature":        self.temperature,
+            "max_tokens":         self.max_tokens,
+            "top_k":              self.top_k,
+            "top_p":              self.top_p,
+            "min_p":              self.min_p,
+            "repetition_penalty": self.repetition_penalty,
+            "thinking_enabled":   self.thinking_enabled,
+            "rag_memory_enabled": self.rag_memory_enabled,
+            "mcp_max_iterations": self.mcp_max_iterations,
+        }
+
+    def _load_audio_devices(self):
+        # === Load mics and output devices via AudioProcessor ===
+        mics, outputs = self.audio.load_devices()
+        if hasattr(self, 'mic_dropdown'):
+            self.mic_dropdown.clear()
+            self.mic_dropdown.addItems(mics if mics else ["No microphones found"])
+        if hasattr(self, 'output_device_dropdown'):
+            self.output_device_dropdown.clear()
+            self.output_device_dropdown.addItems(outputs if outputs else ["No output devices found"])
+
+    def _get_rag_config(self):
+        # === Returns RAG config dict for RAGManager ===
+        return {
+            "rag_memory_enabled": self.rag_memory_enabled,
+            "current_rag_dir":    self.current_rag_dir,
+        }
+
+    def _get_audio_config(self):
+        # === Returns current audio/STT config dict for AudioProcessor ===
+        return {
+            "vad_device":              self.vad_device,
+            "vad_threshold":           self.vad_threshold,
+            "vad_min_speech_duration": self.vad_min_speech_duration,
+            "vad_min_silence_duration":self.vad_min_silence_duration,
+            "mic_volume":              self.mic_volume,
+            "whisper_model":           self.whisper_model,
+            "whisper_device":          self.whisper_device,
+            "whisper_language":        self.whisper_language,
+        }
+
+    def _on_mcp_connected(self, mcp_system_prompt):
+        # === Called by LLMClient after successful MCP connection — updates GUI prompt_text ===
+        if not mcp_system_prompt:
+            return
+        current_text = self.prompt_text.toPlainText()
+        if "TOOL DEFINITIONS:" in current_text:
+            return
+        new_text = current_text.strip() + "\n\n" + mcp_system_prompt
+        self.prompt_text.setPlainText(new_text)
+        logging.info("MCP prompt added to UI")
 
     def toggle_recording(self):
         try:
@@ -1637,11 +3515,7 @@ class AIAssistantGUI(QMainWindow):
             return
         if not self.is_recording:
             self.is_recording = True
-            self.stop_event.clear()
-            self.stop_tts_flag.clear()
-            self.audio_thread = threading.Thread(target=self.record_audio_continuous, args=(device_index,))
-            self.audio_thread.daemon = True
-            self.audio_thread.start()
+            self.audio_thread = self.audio.start(device_index)
             self.start_stop_button.setText("Stop")
             self.start_stop_button.setStyleSheet("""
                 QPushButton {
@@ -1656,17 +3530,15 @@ class AIAssistantGUI(QMainWindow):
             logging.info("Recording started.")
         else:
             self.is_recording = False
-            self.stop_event.set()
-            self.stop_tts_stream()
-            self.recording_paused = False
-            self.resume_event.set() 
+            self.audio.stop()
+            self.stop_tts_stream() 
             logging.info("Stopping recording...")
 
             def check_thread():
                 if self.audio_thread and self.audio_thread.is_alive():
                     QTimer.singleShot(100, check_thread)
                 else:
-                    self.cleanup_audio_resources()
+                    self.audio.cleanup()
                     self.audio_thread = None
                     logging.info("Audio thread stopped.")
                     self.start_stop_button.setText("Start")
@@ -1685,131 +3557,11 @@ class AIAssistantGUI(QMainWindow):
 
             check_thread()
 
-    def record_audio_continuous(self, device_index):
-        try:
-            self.audio_pyaudio = pyaudio.PyAudio()
-            self.audio_stream = self.audio_pyaudio.open(
-                format=FORMAT,
-                channels=CHANNELS,
-                rate=RATE,
-                input=True,
-                input_device_index=device_index,
-                frames_per_buffer=CHUNK
-            )
-            logging.info("Recording started.")
-            frames = []
-            recording_active = False
-            speech_detected_frames = 0
-            silence_detected_frames = 0
-            
-            min_speech_frames = int(self.vad_min_speech_duration * RATE / VAD_WINDOW_SIZE)
-            min_silence_frames = int(self.vad_min_silence_duration * RATE / VAD_WINDOW_SIZE)
-
-            if self.vad_model is None:
-                self.init_silero_vad()
-
-            while not self.stop_event.is_set():
-                # === PAUSE LOGIC WITH FLUSHING ===
-                if self.recording_paused and not self.real_talk_enabled:
-                    time.sleep(0.05)
-                    self.vu_input_signal.emit(0)
-                    
-                    # === ⚠️ CRITICAL: While it's on pause, it reads and discards the data ⚠️ ===
-                    # === This keeps the buffer empty and prevents "echo" (mic bleed) ===
-                    if self.audio_stream:
-                        try:
-                            to_read = self.audio_stream.get_read_available()
-                            if to_read > 0:
-                                self.audio_stream.read(to_read, exception_on_overflow=False)
-                        except:
-                            pass
-                    continue
-
-                try:
-                    audio_data = np.frombuffer(self.audio_stream.read(CHUNK, exception_on_overflow=False), dtype=np.int16)
-                    
-                    mic_volume_factor = self.mic_volume / 100.0
-                    audio_data = (audio_data * mic_volume_factor).astype(np.int16)
-                    audio_float = audio_data.astype(np.float32) / 32768.0
-                    
-                    rms = np.sqrt(np.mean(audio_float ** 2))
-                    level = min(int(rms * 100), 14)
-                    self.vu_input_signal.emit(level)
-
-                    vad_buffer = audio_float
-                    if len(vad_buffer) >= VAD_WINDOW_SIZE:
-                        audio_chunk = vad_buffer[:VAD_WINDOW_SIZE]
-                        if len(audio_chunk) == VAD_WINDOW_SIZE and self.vad_model:
-                            audio_tensor = torch.tensor(audio_chunk, dtype=torch.float32).unsqueeze(0).to(self.vad_device)
-                            with torch.no_grad():
-                                speech_prob = self.vad_model(audio_tensor, RATE).item()
-                        else:
-                            speech_prob = 0.0
-
-                        # === BARGE-IN LOGIC (REAL TALK) ===
-                        if speech_prob > self.vad_threshold:
-                             if self.real_talk_enabled and self.tts_active:
-                                logging.info("REAL TALK: Barge-in detected! Stopping TTS...")
-                                self.stop_tts_stream()
-                                time.sleep(0.05) # === Waits audio stop ===
-                                frames = []
-                                recording_active = True
-                                speech_detected_frames = 0
-                                silence_detected_frames = 0
-
-                        if speech_prob > self.vad_threshold:
-                            if not recording_active:
-                                logging.info("Speech started...")
-                                recording_active = True
-                            frames.append(audio_data.tobytes())
-                            speech_detected_frames += 1
-                            silence_detected_frames = 0
-                        else:
-                            if recording_active:
-                                frames.append(audio_data.tobytes())
-                                silence_detected_frames += 1
-                                if silence_detected_frames >= min_silence_frames and speech_detected_frames >= min_speech_frames:
-                                    # === END OF SENTENCE ===
-                                    logging.info("End of speech detected.")
-                                    
-                                    if not self.real_talk_enabled:
-                                        self.recording_paused = True
-                                        # === Flush immediately to clear the last ms of silence ===
-                                        if self.audio_stream:
-                                            try:
-                                                self.audio_stream.read(self.audio_stream.get_read_available(), exception_on_overflow=False)
-                                            except: pass
-                                        logging.info("Microphone PAUSED.")
-                                        self.vu_input_signal.emit(0)
-
-                                    segment_frames = frames.copy()
-                                    processing_thread = threading.Thread(target=self.process_audio_segment, args=(segment_frames,))
-                                    processing_thread.daemon = True
-                                    processing_thread.start()
-
-                                    frames = []
-                                    recording_active = False
-                                    speech_detected_frames = 0
-                                    silence_detected_frames = 0
-                                    
-                            else:
-                                frames = []
-                except Exception as e:
-                    logging.error(f"Error reading audio stream: {str(e)}")
-                    break
-        except Exception as e:
-            logging.error(f"Recording error: {str(e)}")
-            QMessageBox.critical(self, "Error", f"Recording error: {str(e)}")
-        finally:
-            self.cleanup_audio_resources()
-            if self.real_talk_enabled and not self.stop_event.is_set():
-                QTimer.singleShot(100, self.toggle_recording)
-
     def process_audio_segment(self, frames):
         try:
             audio_bytes = b''.join(frames)
             audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-            transcription = self.transcribe_audio(audio_array)
+            transcription = self.audio.transcribe_audio(audio_array)
 
             if not transcription:
                 return
@@ -1836,26 +3588,26 @@ class AIAssistantGUI(QMainWindow):
                     logging.info("Wake word not detected.")
 
             if should_process:
-                initial_response = self.query_lm_studio(prompt_to_process)
+                initial_response = self.llm.query(prompt_to_process)
                 if not initial_response:
                     return
 
                 # === FORK: Simple Chat vs MCP workflow ===
-                tool_calls = self.parse_tool_calls(initial_response)
+                tool_calls = self.llm.parse_tool_calls(initial_response)
 
                 if tool_calls and self.use_mcp_server:
                     logging.info("🔗 MCP workflow detected")
-                    final_response_text = self.mcp_chain_executor(prompt_to_process, initial_response)
+                    final_response_text = self.llm.mcp_chain_executor(prompt_to_process, initial_response)
                 else:
                     logging.info("💬 Simple chat mode")
-                    final_response_text = self.extract_text_response(initial_response)
+                    final_response_text = self.llm.extract_text_response(initial_response)
 
                 if final_response_text:
                     logging.info(f"Assistant: {final_response_text}")
                     self.append_log("Assistant", final_response_text)
 
                     completion_event = threading.Event()
-                    self.tts_queue.put((final_response_text, completion_event))
+                    self.tts.speak(final_response_text, completion_event)
 
                     if not self.real_talk_enabled:
                         # === Wait for confirmed TTS completion from playback thread ===
@@ -1867,19 +3619,17 @@ class AIAssistantGUI(QMainWindow):
                         time.sleep(0.18)
 
                         # === Resume mic only after TTS fully finished ===
-                        if self.recording_paused:
-                            self.recording_paused = False
-                            self.resume_event.set()
+                        if self.audio.recording_paused:
+                            self.audio.recording_paused = False
+                            self.audio.resume_event.set()
                             logging.info("Microphone resumed after full TTS playback.")
 
         except Exception as e:
             logging.error(f"Error in process_audio_segment: {str(e)}")
         finally:
             # === Safety fallback — mic resumes even if an error occurred ===
-            if not self.real_talk_enabled and self.recording_paused:
-                self.recording_paused = False
-                self.resume_event.set()
-                logging.info("Microphone resumed (safety fallback).")
+            if not self.real_talk_enabled and self.audio.recording_paused:
+                self.audio.resume_mic()
 
     def send_manual_query(self):
         """
@@ -1914,112 +3664,26 @@ class AIAssistantGUI(QMainWindow):
             # === Manual input always bypasses wake word ===
             prompt_to_process = text
 
-            initial_response = self.query_lm_studio(prompt_to_process)
+            initial_response = self.llm.query(prompt_to_process)
             if not initial_response:
                 return
 
-            tool_calls = self.parse_tool_calls(initial_response)
+            tool_calls = self.llm.parse_tool_calls(initial_response)
 
             if tool_calls and self.use_mcp_server:
                 logging.info("🔗 MCP workflow detected")
-                final_response_text = self.mcp_chain_executor(prompt_to_process, initial_response)
+                final_response_text = self.llm.mcp_chain_executor(prompt_to_process, initial_response)
             else:
                 logging.info("💬 Simple chat mode")
-                final_response_text = self.extract_text_response(initial_response)
+                final_response_text = self.llm.extract_text_response(initial_response)
 
             if final_response_text:
                 logging.info(f"Assistant: {final_response_text}")
                 self.append_log("Assistant", final_response_text)
-                self.tts_queue.put((final_response_text, None))
+                self.tts.speak(final_response_text, None)
 
         except Exception as e:
             logging.error(f"Error in manual query: {str(e)}")
-
-    def extract_json_blocks(self, text: str):
-        blocks = []
-        stack = 0
-        start = None
-
-        for i, ch in enumerate(text):
-            if ch == "{":
-                if stack == 0:
-                    start = i
-                stack += 1
-            elif ch == "}":
-                stack -= 1
-                if stack == 0 and start is not None:
-                    blocks.append(text[start:i+1])
-        return blocks
-
-    def sanitize_json_string(self, s: str) -> str:
-        # === Eliminate markdown blocks ===
-        s = re.sub(r"```json", "", s, flags=re.IGNORECASE)
-        s = re.sub(r"```", "", s)
-    
-        # === Eliminate trailing commas ===
-        s = re.sub(r",\s*}", "}", s)
-        s = re.sub(r",\s*\]", "]", s)
-    
-        # === Return result cleaned of unnecesary spaces ===
-        return s.strip()
-
-    def validate_and_parse_json(self, block: str):
-        block = self.sanitize_json_string(block)
-        try:
-            return json.loads(block)
-        except json.JSONDecodeError as e:
-            error_pos = e.pos
-            logging.warning(f"JSON invalid at position {error_pos}: {e.msg}")
-            if "Expecting" in e.msg:
-                block = re.sub(r':\s*([^",\[\{]+?)(?=[,\}])', r': "\1"', block)
-            try:
-                return json.loads(block)
-            except:
-                logging.error(f"Failed to parse JSON: {block}")
-                return None
-
-    def parse_tool_calls(self, response: str):
-        """
-        Parse tool calls from AI response
-        Expected format: {"id":"...", "tool":"...", "arguments":{}}
-        """
-        tool_calls = []
-        json_blocks = self.extract_json_blocks(response)
-
-        for block in json_blocks:
-            parsed = self.validate_and_parse_json(block)
-            if not parsed:
-                continue
-    
-            # === Check for valid tool call format (MCP Standard) ===
-            if "tool" in parsed and "arguments" in parsed:
-                tool_calls.append(parsed)
-                logging.info(f"✅ Parsed tool call: {parsed['tool']} (id: {parsed.get('id', 'N/A')})")
-            else:
-                logging.warning(f"⚠️ Invalid tool call structure (missing 'tool' or 'arguments'): {parsed}")
-
-        if tool_calls:
-            logging.info(f"📦 Total tool calls parsed: {len(tool_calls)}")
-
-        return tool_calls
-
-    def init_silero_vad(self):
-        logging.info("Loading Silero VAD model")
-        try:
-            vad_model_path = os.path.join(BASE_DIR, "Silero VAD", "Models", "silero_vad.jit")
-            if not os.path.exists(vad_model_path):
-                raise FileNotFoundError(f"Silero VAD model not found at {vad_model_path}")
-        
-            self.vad_model = torch.jit.load(vad_model_path, map_location=self.vad_device)
-            self.vad_model.eval()
-            logging.info(f"✅ Silero VAD loaded on {self.vad_device}")
-        
-        except Exception as e:
-            logging.error(f"❌ Silero VAD Error: {str(e)}")
-            QMessageBox.critical(self, "Silero VAD Error", 
-                f"Could not load VAD model:\n\n{str(e)}\n\n"
-                f"Expected location:\n{os.path.join(BASE_DIR, 'Silero VAD', 'Models', 'silero_vad.jit')}"
-            )
 
     def switch_profile_paths(self, profile_name):
         """
@@ -2027,11 +3691,8 @@ class AIAssistantGUI(QMainWindow):
         Always requires a profile name — no more generic mode.
         """
         self.current_profile_name = profile_name
-        self.current_chat_log     = os.path.join(HISTORY_DIR, f"{profile_name}.txt")
-        self.current_rag_dir      = os.path.join(RAG_DATABASE_DIR, profile_name)
-
-        os.makedirs(HISTORY_DIR, exist_ok=True)
-        os.makedirs(self.current_rag_dir, exist_ok=True)
+        self.current_chat_log     = self.profiles.get_chat_log_path(profile_name)
+        self.current_rag_dir      = self.profiles.ensure_profile_directories(profile_name)
         logging.info(f"Profile paths switched → '{profile_name}'")
 
         self.update_profile_display(profile_name)
@@ -2246,7 +3907,7 @@ class AIAssistantGUI(QMainWindow):
         if 'use_mcp_server' in settings:
             mcp_enabled = settings['use_mcp_server'].lower() == 'true'
             # === Always reset mcp_connected so init runs fresh on every profile load ===
-            self.mcp_connected = False
+            self.llm.mcp_connected = False
             # === Update radio button UI (block signals to avoid double-call) ===
             idx = 0 if mcp_enabled else 1
             btn = self.mcp_group.button(idx)
@@ -2301,457 +3962,6 @@ class AIAssistantGUI(QMainWindow):
 
         if 'prompt_text' in settings and settings['prompt_text'].strip():
             self.prompt_text.setPlainText(settings['prompt_text'])
-
-    def _cleanup_orphaned_rag_folders(self):
-        """
-        Deletes UUID hash folders in current_rag_dir that don't belong
-        to the active collection. Called after every get/create collection.
-        Prevents folder accumulation on Windows where ChromaDB can't auto-delete.
-        """
-        if not self.rag_collection or not os.path.exists(self.current_rag_dir):
-            return
-        try:
-            active_uuid = str(self.rag_collection.id)
-            for item in os.listdir(self.current_rag_dir):
-                item_path = os.path.join(self.current_rag_dir, item)
-                if os.path.isdir(item_path) and item != active_uuid:
-                    try:
-                        shutil.rmtree(item_path)
-                        logging.info(f"🧹 Removed orphaned RAG folder: {item}")
-                    except Exception as e:
-                        logging.warning(f"⚠️ Could not remove orphaned folder '{item}': {e}")
-        except Exception as e:
-            logging.warning(f"⚠️ Orphaned folder cleanup failed: {e}")
-
-    def reinit_rag_for_profile(self):
-        """
-        Closes the current ChromaDB client and reinitializes it
-        pointing to the current profile's RAG folder.
-        """
-        try:
-            self.rag_collection = None
-            self.rag_client = None
-            gc.collect()
-
-            self.rag_client = chromadb.PersistentClient(
-                path=self.current_rag_dir,
-                settings=Settings(anonymized_telemetry=False, allow_reset=True)
-            )
-            self.rag_collection = self.rag_client.get_or_create_collection(
-                name="chat_memory",
-                metadata={"hnsw:space": "cosine"}
-            )
-            self._cleanup_orphaned_rag_folders()
-            logging.info(f"✅ RAG reinitialized → '{self.current_rag_dir}' | Docs: {self.rag_collection.count()}")
-
-        except Exception as e:
-            logging.error(f"❌ RAG reinit error: {str(e)}")
-            QMessageBox.warning(self, "RAG Warning",
-                f"RAG could not be reinitialized:\n{str(e)}")
-
-    def init_rag_system(self):
-        """RAG system initialization with MiniLM and ChromaDB"""
-        try:
-            logging.info("Loading RAG Embedder Model (MiniLM-L6-v2)...")
-            self.rag_embedder = SentenceTransformer(RAG_EMBEDDER_DIR)
-            logging.info("RAG Embedder loaded successfully.")
-        
-            # === ChromaDB initialization ===
-            self.rag_client = chromadb.PersistentClient(
-                path=self.current_rag_dir, # === Dynamic Folder ===
-                settings=Settings(anonymized_telemetry=False, allow_reset=True)
-            )
-        
-            # === Create/Access collection ===
-            self.rag_collection = self.rag_client.get_or_create_collection(
-                name="chat_memory",
-                metadata={"hnsw:space": "cosine"}
-            )
-            self._cleanup_orphaned_rag_folders()
-            logging.info(f"RAG Database initialized. Documents: {self.rag_collection.count()}")
-        
-        except Exception as e:
-            logging.error(f"RAG Initialization Error: {str(e)}")
-            QMessageBox.warning(self, "RAG Warning", 
-                f"RAG system could not be initialized:\n{str(e)}\n\nContinuing without RAG memory.")
-
-    def rag_worker(self):
-        """Worker thread for dynamic vector base update"""
-        try:
-            while not self.rag_event.is_set():
-                try:
-                    item = self.rag_queue.get(timeout=0.5)
-                    if item is None:
-                        break
-                
-                    role, text, timestamp = item
-                
-                    if not self.rag_memory_enabled or not self.rag_embedder:
-                        continue
-                
-                    # === Embedding generation ===
-                    embedding = self.rag_embedder.encode(text).tolist()
-                
-                    # === Unique ID based on timestamp ===
-                    doc_id = f"{role}_{timestamp.replace(' ', '_').replace(':', '-')}"
-                
-                    # === Add to ChromaDB ===
-                    self.rag_collection.add(
-                        embeddings=[embedding],
-                        documents=[text],
-                        metadatas=[{"role": role, "timestamp": timestamp}],
-                        ids=[doc_id]
-                    )
-                
-                    logging.info(f"✅ RAG: Indexed {role} message (ID: {doc_id})")
-                
-                except queue.Empty:
-                    continue
-                except Exception as e:
-                    logging.error(f"RAG Worker Error: {str(e)}")
-                
-        except Exception as e:
-            logging.error(f"Critical RAG Worker Error: {str(e)}")
-
-    def query_rag_memory(self, query_text, top_k=6, recent_lines=None):
-        """
-        RAG memory query.
-        Args:
-            query_text:   current user message
-            top_k:        max messages to return — half User, half Assistant
-            recent_lines: set of normalized texts already in recent_context
-                          RAG skips these to avoid duplicates in the LLM prompt
-        Returns: formatted string with relevant past messages, deduplicated
-        """
-        try:
-            if not self.rag_memory_enabled or not self.rag_embedder or self.rag_collection.count() == 0:
-                return ""
-
-            if recent_lines is None:
-                recent_lines = set()
-
-            # === Generate embedding for query ===
-            query_embedding = self.rag_embedder.encode(query_text).tolist()
-
-            # === Fetch top_k*3 so we have room to filter and still balance ===
-            results = self.rag_collection.query(
-                query_embeddings=[query_embedding],
-                n_results=min(top_k * 3, self.rag_collection.count())
-            )
-
-            if not results['documents'] or not results['documents'][0]:
-                return ""
-
-            # ====== COLLECT + FILTER — keep timestamp for sorting ======
-            candidates = []   # list of (timestamp, role, doc_clean)
-            seen_texts = set()
-
-            for doc, meta in zip(results['documents'][0], results['metadatas'][0]):
-                role      = meta.get('role', 'Unknown')
-                timestamp = meta.get('timestamp', '')
-
-                # === Only User and Assistant — skip MCP entries ===
-                if role not in ('User', 'Assistant'):
-                    continue
-
-                # === Text cleanup ===
-                import re
-                doc_clean = re.sub(r"[^\w\s,.!?'-]", '', doc, flags=re.UNICODE)
-                doc_clean = ' '.join(doc_clean.split())
-
-                if not doc_clean.strip() or len(doc_clean.strip()) < 5:
-                    continue
-
-                if len(doc_clean) > 150:
-                    doc_clean = doc_clean[:150] + "..."
-
-                # === A: Skip if already in recent_context ===
-                doc_normalized = doc_clean.lower()[:80]
-                if doc_normalized in recent_lines:
-                    logging.debug(f"\U0001f501 RAG dedup skipped (in recent): {doc_clean[:60]}")
-                    continue
-
-                # === Skip internal RAG duplicates ===
-                if doc_clean in seen_texts:
-                    continue
-                seen_texts.add(doc_clean)
-
-                candidates.append((timestamp, role, doc_clean))
-
-            # ====== SORT CHRONOLOGICALLY by timestamp ======
-            candidates.sort(key=lambda x: x[0])
-
-            # ====== BUILD REAL PAIRS in chronological order ======
-            # Walk forward: each User followed by the next Assistant = one pair
-            pairs = []
-            i = 0
-            while i < len(candidates) and len(pairs) < (top_k // 2):
-                ts, role, text = candidates[i]
-                if role == 'User':
-                    # Look for the next Assistant right after this User
-                    if i + 1 < len(candidates) and candidates[i + 1][1] == 'Assistant':
-                        pairs.append((text, candidates[i + 1][2]))
-                        i += 2
-                    else:
-                        i += 1
-                else:
-                    i += 1
-
-            # === FINAL FORMATTING ===
-            context_parts = []
-            for user_text, assistant_text in pairs:
-                context_parts.append(f"User: {user_text}")
-                context_parts.append(f"Assistant: {assistant_text}")
-
-            context = "\n".join(context_parts)
-
-            # === TOKEN LIMIT ===
-            max_chars = 2000
-            if len(context) > max_chars:
-                context = context[:max_chars]
-                last_newline = context.rfind('\n')
-                if last_newline > 0:
-                    context = context[:last_newline]
-            logging.info(f"✅ RAG: {len(pairs)} pairs (~{len(context)//4} tokens)")
-
-            return context
-
-        except Exception as e:
-            logging.error(f"RAG Query Error: {str(e)}")
-            import traceback
-            logging.error(traceback.format_exc())
-            return ""
-
-    def tts_worker(self):
-            p      = None
-            stream = None
-            PLAYBACK_CHUNK = 1024
-            SAMPLE_RATE    = 24000
-
-            try:
-                p = pyaudio.PyAudio()
-                output_device_str   = self.output_device_dropdown.currentText()
-                output_device_index = int(output_device_str.split(":")[0]) if "No output" not in output_device_str else None
-
-                stream = p.open(
-                    format=pyaudio.paInt16,
-                    channels=1,
-                    rate=SAMPLE_RATE,
-                    output=True,
-                    output_device_index=output_device_index,
-                    frames_per_buffer=PLAYBACK_CHUNK
-                )
-                self.current_tts_stream = stream
-                logging.info("TTS Stream initialized.")
-
-                while not self.tts_event.is_set():
-                    completion_event = None
-                    try:
-                        item = self.tts_queue.get(timeout=0.1)
-                        if item is None:
-                            break
-                        text, completion_event = item
-
-                        if self.stop_tts_flag.is_set():
-                            self.stop_tts_flag.clear()
-                            if completion_event: completion_event.set()
-                            continue
-
-                        self.tts_active = True
-                        self.stop_tts_flag.clear()
-                        logging.info(f"Processing TTS: {text[:70]}...")
-
-                        if not stream.is_active():
-                            stream.start_stream()
-
-                        if self.coqui_model is None:
-                            if torch.cuda.is_available():
-                                torch.cuda.empty_cache()
-                            device = self.coqui_device
-                            config = XttsConfig()
-                            config.load_json(os.path.join(COQUI_MODELS_DIR, "config.json"))
-                            self.coqui_model = Xtts.init_from_config(config)
-                            self.coqui_model.load_checkpoint(config, checkpoint_dir=COQUI_MODELS_DIR, eval=True)
-                            self.coqui_model.to(device)
-                            logging.info("XTTS Model Loaded.")
-
-                        # === Recalculate latents if voice sample changed ===
-                        if self.speaker_latents is None:
-                            speaker_wav                        = os.path.join(COQUI_SAMPLES_DIR, self.selected_coqui_sample)
-                            gpt_cond_latent, speaker_embedding = self.coqui_model.get_conditioning_latents(audio_path=[speaker_wav])
-                            self.speaker_latents               = (gpt_cond_latent, speaker_embedding)
-                            logging.info(f"XTTS Latents Recalculated for: {self.selected_coqui_sample}")
-
-                        text_for_tts = emoji.demojize(text)
-                        audio_chunks = self.coqui_model.inference_stream(
-                            text=text_for_tts,
-                            language=self.whisper_language if self.whisper_language != "auto" else "en",
-                            gpt_cond_latent=self.speaker_latents[0],
-                            speaker_embedding=self.speaker_latents[1],
-                            stream_chunk_size=self.coqui_stream_chunk_size,
-                            temperature=self.coqui_temperature,
-                            enable_text_splitting=True,
-                            speed=self.coqui_speed
-                        )
-
-                        # === Playback queue — decouples GPU generation from audio playback ===
-                        playback_queue = queue.Queue(maxsize=0)
-                        playback_done  = threading.Event()
-
-                        def playback_thread_func():
-                            try:
-                                while True:
-                                    chunk = playback_queue.get()
-
-                                    if chunk is None:  # === Sentinel — end of audio ===
-                                        break
-
-                                    if self.stop_tts_flag.is_set():
-                                        # === Flush remaining chunks and exit immediately ===
-                                        while not playback_queue.empty():
-                                            try: playback_queue.get_nowait()
-                                            except: pass
-                                        break
-
-                                    # === Emit VU BEFORE write — synchronized with actual playback ===
-                                    audio_float = chunk.astype(np.float32) / 32768.0
-                                    rms         = np.sqrt(np.mean(audio_float ** 2))
-                                    level       = min(int(rms * 100), 14)
-                                    self.vu_output_signal.emit(level)
-
-                                    with self.tts_lock:
-                                        if stream.is_stopped(): stream.start_stream()
-                                        stream.write(chunk.tobytes())
-
-                            except Exception as e:
-                                logging.error(f"Playback thread error: {e}")
-                            finally:
-                                # === Guaranteed — playback_done always set even on exception ===
-                                playback_done.set()
-
-                        pb_thread = threading.Thread(target=playback_thread_func, daemon=True)
-                        pb_thread.start()
-
-                        # === GPU generates chunks and feeds the playback queue ===
-                        for audio_chunk in audio_chunks:
-                            if self.stop_tts_flag.is_set():
-                                logging.info("TTS interrupted.")
-                                break
-
-                            audio_data_full = (audio_chunk.squeeze().cpu().numpy() * 32767).astype(np.int16)
-                            audio_data_full = (audio_data_full * (self.volume_level / 100.0)).astype(np.int16)
-
-                            for i in range(0, len(audio_data_full), PLAYBACK_CHUNK):
-                                if self.stop_tts_flag.is_set():
-                                    break
-                                playback_queue.put(audio_data_full[i:i + PLAYBACK_CHUNK])
-
-                        # === Send sentinel — signals end of generation ===
-                        playback_queue.put(None)
-
-                        # === Wait for playback thread to fully finish ===
-                        if not playback_done.wait(timeout=45):
-                            logging.warning("Playback timeout!")
-
-                        # === Final hardware buffer drain ===
-                        with self.tts_lock:
-                            if stream and stream.is_active():
-                                try:
-                                    stream.stop_stream()
-                                    time.sleep(0.1)  # === Small hardware drain margin ===
-                                    stream.start_stream()
-                                except:
-                                    pass
-
-                    except queue.Empty:
-                        continue
-                    except Exception as e:
-                        logging.error(f"TTS Error: {str(e)}")
-                        self.coqui_model = None  # === Force model reload on next request ===
-                    finally:
-                        self.tts_active = False
-                        self.stop_tts_flag.clear()
-                        self.vu_output_signal.emit(0)
-                        # === completion_event.set() called AFTER full hardware drain ===
-                        if completion_event is not None:
-                            completion_event.set()
-                            logging.info("TTS completion signaled — audio fully played.")
-
-            except Exception as e:
-                logging.error(f"Critical TTS Worker Error: {str(e)}")
-            finally:
-                with self.tts_lock:
-                    if stream:
-                        try:
-                            stream.stop_stream()
-                            stream.close()
-                        except:
-                            pass
-                    if p:
-                        p.terminate()
-
-    def load_mics(self):
-        logging.info("Loading audio input devices")
-        try:
-            p = pyaudio.PyAudio()
-            mics = []
-            for i in range(p.get_device_count()):
-                device_info = p.get_device_info_by_index(i)
-                if device_info['maxInputChannels'] > 0:
-                    mics.append(f"{i}: {device_info['name']}")
-            p.terminate()
-            self.mic_dropdown.addItems(mics)
-            if mics:
-                self.mic_dropdown.setCurrentIndex(0)
-                self.selected_mic = mics[0]
-                logging.info(f"Microphones loaded: {mics}")
-            else:
-                self.mic_dropdown.addItem("No microphones found")
-                logging.warning("No microphones found")
-        except Exception as e:
-            logging.error(f"Microphone error: {str(e)}")
-            QMessageBox.critical(self, "Error", f"Microphone error: {str(e)}")
-
-    def load_output_devices(self):
-        logging.info("Loading audio output devices")
-        try:
-            p = pyaudio.PyAudio()
-            devices = []
-            for i in range(p.get_device_count()):
-                device_info = p.get_device_info_by_index(i)
-                if device_info['maxOutputChannels'] > 0:
-                    devices.append(f"{i}: {device_info['name']}")
-            p.terminate()
-            self.output_device_dropdown.addItems(devices)
-            if devices:
-                self.output_device_dropdown.setCurrentIndex(0)
-                self.selected_output_device = devices[0]
-                logging.info(f"Output devices loaded: {devices}")
-            else:
-                self.output_device_dropdown.addItem("No output devices found")
-                logging.warning("No output devices found")
-        except Exception as e:
-            logging.error(f"Output device error: {str(e)}")
-            QMessageBox.critical(self, "Error", f"Output device error: {str(e)}")
-
-    def load_coqui_samples(self):
-        logging.info("Loading Coqui TTS samples")
-        try:
-            if not os.path.exists(COQUI_SAMPLES_DIR):
-                raise FileNotFoundError(f"Coqui samples directory not found at {COQUI_SAMPLES_DIR}")
-            samples = glob.glob(os.path.join(COQUI_SAMPLES_DIR, "*.wav"))
-            sample_names = [os.path.basename(s) for s in samples]
-            self.coqui_dropdown.addItems(sample_names)
-            if sample_names:
-                self.coqui_dropdown.setCurrentIndex(0)
-                self.selected_coqui_sample = sample_names[0]
-                logging.info(f"Coqui samples loaded: {sample_names}")
-            else:
-                self.coqui_dropdown.addItem("No Coqui samples found")
-                logging.warning("No Coqui samples found")
-        except Exception as e:
-            logging.error(f"Coqui error: {str(e)}")
-            QMessageBox.critical(self, "Error", f"Coqui error: {str(e)}")
 
     def load_lm_models(self):
         logging.info("Loading LM Studio models")
@@ -2825,696 +4035,6 @@ class AIAssistantGUI(QMainWindow):
         if self.lm_model_dropdown.count() == 0 or "No loaded models" in self.lm_model_dropdown.itemText(0):
             QTimer.singleShot(500, check)  # === Starts before 0.5s on startup ===
 
-    def transcribe_audio(self, audio_array):
-        """Transcribe audio using Faster-Whisper (optimized, local models only)"""
-        logging.info("Transcribing audio with Faster-Whisper")
-        try:
-            model_name = self.whisper_model
-            device = self.whisper_device
-        
-            # === CHECK MODEL OR DEVICE CHANGE ===
-            model_changed = (self.current_whisper_model != model_name)
-            device_changed = (self.current_whisper_device != device)
-        
-            if self.faster_whisper_model is None or model_changed or device_changed:
-            
-                # === OLD MODEL RELEASE ===
-                if self.faster_whisper_model is not None:
-                    logging.info(f"🗑️ Unloading old Whisper model: {self.current_whisper_model}")
-                    del self.faster_whisper_model
-                    self.faster_whisper_model = None
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                        logging.info("🗑️ VRAM cleared")
-            
-                # === GET LOCAL PATH ===
-                model_path = self.get_whisper_model_path(model_name)
-                if not model_path:
-                    error_msg = f"Whisper model '{model_name}' not found in local directory!"
-                    logging.error(error_msg)
-                    QMessageBox.critical(self, "Model Error", 
-                        f"{error_msg}\n\n"
-                        f"Expected location:\n{WHISPER_MODELS_DIR}\\{model_name}\\model.bin\n\n"
-                        f"Please download the model manually."
-                    )
-                    return None
-            
-                # === DETERMINE COMPUTE TYPE ===
-                if device == "cpu":
-                    compute_type = "int8"  # === CPU: int8 is the fastest ===
-                else:
-                    # === GPU: float16 for maximum compatibility (RTX GPUs ONLY). If you use non RTX GPUs set to int8 or float32 (int8 uses less VRAM and is faster... whisper😅)===
-                    compute_type = "int8"
-            
-                logging.info(f"📥 Loading Faster-Whisper: {model_name} from {model_path}")
-                logging.info(f"⚙️ Device: {device} | Compute: {compute_type}")
-            
-                try:
-                    # === LOAD LOCAL MODEL (no download) ===
-                    self.faster_whisper_model = WhisperModel(
-                        model_path,  # === Complete local path ===
-                        device=device,
-                        compute_type=compute_type,
-                        download_root=None,  # === DISABLE Download ===
-                        local_files_only=True  # === FORCE local only ===
-                    )
-                
-                    # === Update tracking variables ===
-                    self.current_whisper_model = model_name
-                    self.current_whisper_device = device
-                    self.whisper_compute_type = compute_type
-                
-                    logging.info(f"✅ Faster-Whisper loaded successfully!")
-                
-                except Exception as load_error:
-                    logging.error(f"❌ Failed to load model: {str(load_error)}")
-                    QMessageBox.critical(self, "Model Load Error",
-                        f"Could not load Whisper model '{model_name}':\n\n{str(load_error)}\n\n"
-                        f"Verify that model files exist in:\n{model_path}"
-                    )
-                    return None
-        
-            # === TRANSCRIPTION ===
-            language = self.whisper_language if self.whisper_language != "auto" else None
-        
-            segments, info = self.faster_whisper_model.transcribe(
-                audio_array,
-                language=language,
-                beam_size=5,
-                vad_filter=False,
-                word_timestamps=False
-            )
-        
-            # === Extract Text ===
-            transcription = " ".join([segment.text for segment in segments]).strip()
-        
-            # === Log Detected Language ===
-            if language is None:
-                logging.info(f"🌐 Detected language: {info.language} ({info.language_probability:.0%})")
-        
-            return transcription
-        
-        except Exception as e:
-            logging.error(f"❌ Transcription error: {str(e)}")
-            import traceback
-            logging.error(traceback.format_exc())
-            return None
-
-    def query_lm_studio(self, prompt):
-        logging.info("Thinking: Processing prompt with LM Studio")
-    
-        if not self.selected_lm_model or "No loaded models" in self.selected_lm_model:
-            logging.warning("Query aborted: No model loaded.")
-            self.show_warning_signal.emit(
-                "LM Studio Warning", 
-                "Warning: No models loaded.\nPlease load a model in LM Studio to proceed."
-            )
-            return None 
-
-        try:
-            system_prompt = self.prompt_text.toPlainText().strip()
-        
-            # ====== CONSTRUCTING MEMORY CONTEXT ======
-            memory_context = ""
-        
-            if self.rag_memory_enabled:
-                # === RECENT: always 3 pairs (6 messages) for continuity ===
-                recent_context = self.get_recent_conversation(max_pairs=3)
-
-                # === Build dedup set from recent — RAG must not repeat these ===
-                recent_lines = set()
-                if recent_context:
-                    for line in recent_context.splitlines():
-                        text = line.split(": ", 1)[-1].strip().lower()[:80]
-                        if text:
-                            recent_lines.add(text)
-
-                # === RAG: 2 extra pairs from semantic memory, deduplicated ===
-                rag_context = self.query_rag_memory(prompt, top_k=4, recent_lines=recent_lines)
-
-                if rag_context:
-                    memory_context += "=== SEMANTIC MEMORY ===\n"
-                    memory_context += rag_context + "\n\n"
-                    logging.info("📚 RAG: 2 semantic pairs injected (deduplicated)")
-                    logging.debug(f"📚 RAG CONTENT:\n{rag_context}")
-                else:
-                    logging.info("📚 RAG: no results returned for this query")
-
-                if recent_context:
-                    memory_context += "=== RECENT CONTEXT ===\n"
-                    memory_context += recent_context + "\n"
-                    logging.info("🕐 Recent: 3 pairs injected (continuity)")
-                    logging.debug(f"🕐 RECENT CONTENT:\n{recent_context}")
-
-            else:
-                # === RAG OFF: only 3 recent pairs ===
-                recent_context = self.get_recent_conversation(max_pairs=3)
-
-                if recent_context:
-                    memory_context += "=== RECENT CONVERSATION ===\n"
-                    memory_context += recent_context + "\n"
-                    logging.info("🕐 Recent: 3 pairs injected (RAG disabled)")
-                    logging.debug(f"🕐 RECENT CONTENT:\n{recent_context}")
-         
-            # === INJECT MEMORY IN SYSTEM PROMPT ===
-            if memory_context:
-                system_prompt += f"\n\n{memory_context}"
-            
-            # === Inject thinking flag — /think or /no_think prefix for models that support it ===
-            if self.thinking_enabled:
-                prompt = "/think\n" + prompt
-            else:
-                prompt = "/no_think\n" + prompt
-
-            # ====== FULL PROMPT LOGGING — what LLM actually receives ======
-            logging.debug("=" * 60)
-            logging.debug(f"📤 USER PROMPT:\n{prompt}")
-            logging.debug("-" * 60)
-            logging.debug(f"📤 SYSTEM PROMPT SENT TO LLM:\n{system_prompt}")
-            logging.debug("=" * 60)
-
-
-            base_url = self.lm_server.rstrip('/')
-            chat_url = f"{base_url}/v1/chat/completions"
-        
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt}
-            ]
-        
-            payload = {
-                "model": self.selected_lm_model,
-                "messages": messages,
-                "temperature": self.temperature,
-                "max_tokens": max(self.max_tokens, 512),  # === Minimum 512 to prevent JSON truncation ===
-                "top_k": self.top_k,
-                "repetition_penalty": self.repetition_penalty,
-                "min_p": self.min_p,
-                "top_p": self.top_p
-            }
-        
-            response = requests.post(chat_url, json=payload)
-            if response.status_code != 200:
-                error_body = response.text[:500]  # === Log first 500 chars of error response ===
-                logging.error(f"LM Studio HTTP {response.status_code}: {error_body}")
-                return None
-            data = response.json()
-            return data['choices'][0]['message']['content'].strip()
-        
-        except Exception as e:
-            logging.error(f"LM Studio error: {str(e)}")
-            self.show_warning_signal.emit("LM Studio Error", f"Communication error:\n{str(e)}")
-            return None
-
-    def query_lm_studio_chain(self, follow_up_prompt):
-        """
-        === Dedicated LLM call for MCP chain execution ===
-        === No system prompt injection, no memory context ===
-        === Clean focused call — only Tool Chain Rules + results ===
-        """
-        logging.info("Thinking: MCP chain follow-up query")
-
-        if not self.selected_lm_model or "No loaded models" in self.selected_lm_model:
-            logging.warning("Chain query aborted: No model loaded.")
-            return None
-
-        try:
-            # === Inject thinking flag — /think or /no_think prefix for models that support it ===
-            if self.thinking_enabled:
-                follow_up_prompt = "/think\n" + follow_up_prompt
-            else:
-                follow_up_prompt = "/no_think\n" + follow_up_prompt
-
-            base_url = self.lm_server.rstrip('/')
-            chat_url = f"{base_url}/v1/chat/completions"
-
-            messages = [
-                {"role": "user", "content": follow_up_prompt}
-            ]
-
-            base_url = self.lm_server.rstrip('/')
-            base_url = self.lm_server.rstrip('/')
-            chat_url = f"{base_url}/v1/chat/completions"
-
-            messages = [
-                {"role": "user", "content": follow_up_prompt}
-            ]
-
-            payload = {
-                "model":              self.selected_lm_model,
-                "messages":           messages,
-                "temperature":        self.temperature,
-                "max_tokens":         max(self.max_tokens, 512),  # === Minimum 512 for JSON responses ===
-                "top_k":              self.top_k,
-                "repetition_penalty": self.repetition_penalty,
-                "min_p":              self.min_p,
-                "top_p":              self.top_p
-            }
-
-            response = requests.post(chat_url, json=payload)
-            response.raise_for_status()
-            data = response.json()
-            return data['choices'][0]['message']['content'].strip()
-
-        except Exception as e:
-            logging.error(f"Chain LLM error: {str(e)}")
-            return None
-
-    # ====== MCP STANDARD CLIENT - JSON-RPC 2.0 ======
-    
-    def mcp_request(self, method, params=None):
-        """
-        Low-level helper for JSON-RPC 2.0 requests
-        Contains no business logic - only HTTP communication
-        """
-        try:
-
-            base_url = self.mcp_server.rstrip('/')
-            self.mcp_request_id += 1
-            
-            payload = {
-                "jsonrpc": "2.0",
-                "id": self.mcp_request_id,
-                "method": method,
-                "params": params if params else {}
-            }
-
-            # ======================== TEMPORARY DEBUG LOG — REQUEST ===============================================
-            logging.debug(f"[MCP →] id={self.mcp_request_id} method={method}\n"
-                          f"        params={json.dumps(params, indent=2, ensure_ascii=False) if params else '{}'}")
-            # ======================================================================================================
-
-            response = requests.post(base_url, json=payload, timeout=10)
-            response.raise_for_status()
-            data = response.json()
-
-            if "error" in data:
-                # ====================== TEMPORARY DEBUG LOG — ERROR ==============================
-                logging.debug(f"[MCP ←] id={self.mcp_request_id} ERROR:\n"
-                              f"        {json.dumps(data['error'], indent=2, ensure_ascii=False)}")
-                # =================================================================================
-                logging.error(f"❌ MCP Error: {data['error']['message']}")
-                return None
-
-            # ====================== TEMPORARY DEBUG LOG — RESPONSE OK ====================================
-            logging.debug(f"[MCP ←] id={self.mcp_request_id} method={method} OK\n"
-                          f"        result={json.dumps(data.get('result'), indent=2, ensure_ascii=False)}")
-            # =============================================================================================
-
-            return data.get("result")
-            
-        except Exception as e:
-            # ====================== TEMPORARY DEBUG LOG — EXCEPTION ==========================
-            logging.debug(f"[MCP ✗] id={self.mcp_request_id} method={method} EXCEPTION: {e}")
-            # =================================================================================
-            logging.error(f"🔴 MCP request failed: {str(e)}")
-            return None
-
-    def mcp_request_with_retry(self, method, params=None, retries=3, delay=1):
-        """
-       MCP request with retry logic for robustness
-    
-        Args:
-            method: JSON-RPC method
-            params: Method parameters
-            retries: Number of retry attempts (default 3)
-            delay: Delay between retries in seconds (default 1)
-    
-        Returns:
-            Result dict or None if all attempts fail
-        """
-        for attempt in range(retries):
-            try:
-                result = self.mcp_request(method, params)
-                if result:
-                    return result
-            
-                # === Result is None, retry ===
-                if attempt < retries - 1:
-                    logging.warning(f"⚠️ MCP request failed (attempt {attempt + 1}/{retries}), retrying in {delay}s...")
-                    time.sleep(delay)
-        
-            except Exception as e:
-                if attempt < retries - 1:
-                    logging.warning(f"⚠️ MCP request error (attempt {attempt + 1}/{retries}): {e}, retrying...")
-                    time.sleep(delay)
-                else:
-                    logging.error(f"❌ MCP request failed after {retries} attempts: {e}")
-    
-        return None
-    
-    def initialize_mcp_connection(self):
-        """
-        Connecting to the MCP server and getting a system prompt
-        Automatically called at startup or when MCP is activated
-        """
-        try:
-            logging.info("🔄 Connecting to MCP server...")
-            
-            # === Step 1: Initialize ===
-            init_result = self.mcp_request_with_retry("initialize", {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {"tools": {}},
-                "clientInfo": {"name": "Advanced-STS-Local-AI-Assistant", "version": "0.1.6 Beta"}
-            })
-            
-            if not init_result:
-                raise Exception("Initialize failed")
-            
-            # === Step 2: Get system prompt ===
-            prompt_result = self.mcp_request_with_retry("prompts/get", {
-                "name": "assistant_system_prompt"
-            })
-            
-            if not prompt_result:
-                raise Exception("Failed to get system prompt")
-            
-            # === Extract prompt text ===
-            messages = prompt_result.get("messages", [])
-            if messages:
-                self.mcp_system_prompt = messages[0]["content"]["text"]
-                self.mcp_connected = True
-                logging.info(f"✅ MCP connected ({len(self.mcp_system_prompt)} chars prompt)")
-                
-                # === Update GUI ===
-                self.update_prompt_ui_with_mcp()
-                return True
-            
-            raise Exception("No prompt in response")
-            
-        except Exception as e:
-            logging.error(f"❌ MCP connection failed: {str(e)}")
-            self.mcp_connected = False
-            
-            self.show_warning_signal.emit(
-                "MCP Connection Failed",
-                f"Could not connect to MCP server:\n{str(e)}\n\n"
-                f"Server: {self.mcp_server}\n\n"
-                f"MCP features will be disabled."
-            )
-            return False
-    
-    def update_prompt_ui_with_mcp(self):
-        """Add MCP prompt to GUI (if not present)"""
-        if not self.mcp_system_prompt:
-            return
-        
-        current_text = self.prompt_text.toPlainText()
-        
-        # === Check if it's already added ===
-        if "TOOL DEFINITIONS:" in current_text:
-            return
-        
-        # === Append at the end ===
-        new_text = current_text.strip() + "\n\n" + self.mcp_system_prompt
-        self.prompt_text.setPlainText(new_text)
-        logging.info("✅ MCP prompt added to UI")
-    
-    def mcp_chain_executor(self, user_query, initial_response):
-        """
-        MCP Chain Executor - Multi-step tool calling with dedicated prompt
-        
-        This function orchestrates the complete MCP workflow:
-        1. Detect tool calls in AI response
-        2. Run tools on the MCP server
-        3. Send results back to AI with SPECIAL PROMPT
-        4. Repeat until AI gives final answer (without tool calls)
-        
-        Args:
-            user_query: The user's original query
-            initial_response: First AI response (containing tool calls)
-        
-        Returns:
-            str: The final clean response (text only, no JSON)
-        """
-        if not self.mcp_connected:
-            logging.warning("⚠️ MCP not connected, returning initial response")
-            return self.extract_text_response(initial_response)
-        
-        logging.info("🔗 Starting MCP chain execution...")
-        
-        # === Conversation history for context ===
-        conversation = [
-            {"role": "user", "content": user_query},
-            {"role": "assistant", "content": initial_response}
-        ]
-        
-        # === Safe defaults — prevents UnboundLocalError on early exit ===
-        clean_response = ""
-        results        = []
-
-        # === Loop for multi-step tool calling ===
-        for iteration in range(self.mcp_max_iterations):
-            logging.info(f"🔄 MCP Iteration {iteration + 1}/{self.mcp_max_iterations}")
-            
-            # === Parse tool calls from the last AI response ===
-            last_response = conversation[-1]["content"]
-            tool_calls    = self.parse_tool_calls(last_response)
-            
-            if not tool_calls:
-                # === No more tool calls → final answer! ===
-                logging.info("✅ MCP chain complete - no more tool calls")
-                break
-            
-            # === Execute all tool calls ===
-            logging.info(f"🔧 Executing {len(tool_calls)} tool(s)...")
-            results = []
-            
-            for idx, tool_call in enumerate(tool_calls, 1):
-                # === LOG in Debug Console - Full JSON ===
-                logging.info(f"\n📋 Tool Call #{idx}:")
-                logging.info(json.dumps(tool_call, indent=2, ensure_ascii=False))
-                
-                # === LOG MCP Request in chat history (invisible) ===
-                self.append_log(
-                    "MCP Request",
-                    json.dumps(tool_call, ensure_ascii=False),
-                    visible=False
-                )
-                
-                # === Execute tool ===
-                result = self.execute_mcp_tool(tool_call)
-                
-                # === LOG MCP Response in chat history (invisible) ===
-                self.append_log(
-                    "MCP Response",
-                    json.dumps(result, ensure_ascii=False),
-                    visible=False
-                )
-                
-                results.append({
-                    "tool": tool_call.get("tool"),
-                    "result": result
-                })
-                
-                status = "✅" if result.get("ok") else "❌"
-                logging.info(f"  {status} Executed: {tool_call.get('tool')}\n")
-            
-            # === Build SPECIAL prompt for AI ===
-            follow_up_prompt = self.build_mcp_follow_up_prompt(user_query, results)
-            
-            # === Send to AI for processing via dedicated chain call ===
-            next_response = self.query_lm_studio_chain(follow_up_prompt)
-            
-            if not next_response:
-                logging.error("❌ AI returned None, stopping chain")
-                break
-            
-            # === Add to conversation history ===
-            conversation.append({"role": "user",      "content": follow_up_prompt})
-            conversation.append({"role": "assistant", "content": next_response})
-        
-        # === Extract the final clean response (no JSON) ===
-        final_response = conversation[-1]["content"]
-        clean_response = self.extract_text_response(final_response)  # === WAS MISSING! ===
-
-        # === If final response has no text, build summary from last tool results ===
-        if not clean_response and results:
-            last_result = results[-1]
-            tool_name   = last_result.get("tool", "")
-            result_data = last_result.get("result", {})
-            if result_data.get("ok"):
-                clean_response = f"Done — {tool_name} completed successfully."
-            else:
-                clean_response = f"Something went wrong with {tool_name}."
-        elif not clean_response:
-            clean_response = "Done."
-
-        logging.info(f"✅ MCP chain finished after {len(conversation)//2} iterations")
-
-        return clean_response
-    
-    def build_mcp_follow_up_prompt(self, original_query, tool_results):
-        """
-        Builds the SPECIAL prompt for AI after executing tools.
-        Template is loaded from /MCP/Tool Chain Rules.md
-        """
-
-        # === Format results ===
-        results_text = ""
-        for item in tool_results:
-            tool_name = item['tool']
-            result = item['result']
-            if result.get("ok"):
-                results_text += f"\n✅ {tool_name}:\n{json.dumps(result.get('data', result), indent=2)}\n"
-            else:
-                results_text += f"\n❌ {tool_name} FAILED:\n{result.get('error', 'Unknown error')}\n"
-
-        # === Load template from external file ===
-        rules_path = os.path.join(BASE_DIR, "MCP", "Tool Chain Rules.md")
-        template = open(rules_path, "r", encoding="utf-8").read()
-        template = template.replace("\\_", "_")  # === Markdown File auto-escapes underscores ===
-
-        # === Use replace() instead of format() — avoids conflicts with JSON braces in template ===
-        prompt = template
-        prompt = prompt.replace("{separator}", "=" * 60)
-        prompt = prompt.replace("{original_query}", original_query)
-        prompt = prompt.replace("{results_text}", results_text) 
-
-        return prompt
-
-    def execute_mcp_tool(self, tool_call):
-        """
-        Execute MCP tool call - PURE MCP STANDARD
-
-        Expects: {"id": "...", "tool": "tool_name", "arguments": {...}}
-
-        Returns:
-            dict: {"ok": bool, "data": ...} sau {"ok": False, "error": ...}
-        """
-        try:
-            tool_name = tool_call.get("tool", "")
-            arguments = tool_call.get("arguments", {})
-    
-            logging.info(f"🔧 Calling MCP tool: {tool_name}")
-    
-            # === Call MCP Standard ===
-            result = self.mcp_request("tools/call", {
-                "name": tool_name,
-                "arguments": arguments
-            })
-    
-            if not result:
-                return {"ok": False, "error": "MCP request failed"}
-    
-            # === Parse response ===
-            content_blocks = result.get("content", [])
-            if content_blocks:
-                text_content = content_blocks[0].get("text", "")
-        
-                # === Try parse JSON ===
-                try:
-                    data = json.loads(text_content)
-                
-                    # === Handle both dict and list responses ===
-                    if isinstance(data, dict):
-                        #  === Standard response (most tools) ===
-                        return data
-                    elif isinstance(data, list):
-                        # === List response (e.g., gmail_list, calendar_list) ===
-                        return {"ok": True, "data": data}
-                    else:
-                        # === Other types (string, number, etc.) ===
-                        return {"ok": True, "data": data}
-                    
-                except json.JSONDecodeError:
-                    #  === Non-JSON response ===
-                    return {"ok": True, "data": text_content}
-    
-            return {"ok": False, "error": "No content in response"}
-    
-        except Exception as e:
-            logging.error(f"🔴 Tool execution error: {str(e)}")
-            return {"ok": False, "error": str(e)}
-  
-    def extract_text_response(self, response):
-        """
-        Extract only the text from the response, eliminate JSON tool calls
-        """
-        # === Remove all JSON blocks ===
-        json_blocks = self.extract_json_blocks(response)
-        
-        clean_text = response
-        for block in json_blocks:
-            clean_text = clean_text.replace(block, "")
-        
-        # === Cleanup whitespace ===
-        clean_text = " ".join(clean_text.split()).strip()
-        
-        # === If only JSON was in response, return a neutral fallback ===
-        return clean_text if clean_text else ""
-
-
-    def get_recent_conversation(self, max_pairs=3):
-        """
-        Extract the last N real User→Assistant pairs from chat history.
-        Iterates chronologically in reverse, collecting only adjacent
-        User+Assistant pairs — skips MCP Request/Response entries so
-        they cannot cause index misalignment.
-        Args:
-            max_pairs: number of User→Assistant pairs to return
-        Returns:
-            Formatted string in chronological order
-        """
-        try:
-            if not self.chat_history:
-                return ""
-
-            import re
-            pairs = []
-
-            # === Walk backwards, looking for Assistant then its preceding User ===
-            i = len(self.chat_history) - 1
-            while i >= 0 and len(pairs) < max_pairs:
-                entry = self.chat_history[i]
-                role  = entry.get('role', '')
-                text  = entry.get('text', '').strip()
-
-                # === Found an Assistant message — look backwards for its User ===
-                if role == 'Assistant' and text and len(text) >= 5:
-                    # === This regex permits the text to keep the JSON structure: { } [ ] " ' : / \ ===
-                    assistant_text = re.sub(r"[^\w\s,.!?\-\'\"\{\}\[\]:/\\]", '', text, flags=re.UNICODE)
-                    assistant_text = ' '.join(assistant_text.split())
-                    if len(assistant_text) > 150:
-                        assistant_text = assistant_text[:150] + "..."
-
-                    # === Search backwards for the nearest preceding User message ===
-                    j = i - 1
-                    while j >= 0:
-                        prev = self.chat_history[j]
-                        if prev.get('role') == 'User':
-                            user_text = prev.get('text', '').strip()
-                            user_text = re.sub(r"[^\w\s,.!?'-]", '', user_text, flags=re.UNICODE)
-                            user_text = ' '.join(user_text.split())
-                            if len(user_text) > 150:
-                                user_text = user_text[:150] + "..."
-                            if len(user_text) >= 5:
-                                pairs.append((user_text, assistant_text))
-                            i = j - 1  # === Continue search before this User ===
-                            break
-                        j -= 1
-                    else:
-                        i -= 1  # === No User found, move on ===
-                else:
-                    i -= 1
-
-            # === Reverse to chronological order ===
-            pairs.reverse()
-
-            context_parts = []
-            for user_text, assistant_text in pairs:
-                context_parts.append(f"User: {user_text}")
-                context_parts.append(f"Assistant: {assistant_text}")
-
-            result = "\n".join(context_parts)
-
-            logging.info(f"✅ Recent: {len(pairs)} pairs (~{len(result)//4} tokens)")
-
-            return result
-
-        except Exception as e:
-            logging.error(f"Error getting recent conversation: {str(e)}")
-            return ""
     def append_log(self, role, text, visible=True):
         """
         Add message to chat history
@@ -3544,7 +4064,7 @@ class AIAssistantGUI(QMainWindow):
     
         # === RAG indexing (ALWAYS) ===
         if self.rag_memory_enabled:
-            self.rag_queue.put((role, text, timestamp))
+            self.rag.index_message(role, text, timestamp)
 
     def show_about(self):
         """Shows the About dialog centered on screen"""
@@ -3560,7 +4080,7 @@ class AIAssistantGUI(QMainWindow):
         dialog.move(x, y)
 
         # === Version ===
-        version_label = QLabel("Version: 0.1.6 Beta", dialog)
+        version_label = QLabel("Version: 0.1.7 Beta", dialog)
         version_label.setGeometry(140, 2, 200, 20)
         version_label.setStyleSheet("color: #FFFF96; font-weight: bold; font-size: 10pt;")
 
@@ -3733,33 +4253,33 @@ class AIAssistantGUI(QMainWindow):
         """Start MCP server in headless (CLI) mode if not already running"""
         import subprocess, sys
         # === Already running? ===
-        if self.mcp_server_process and self.mcp_server_process.poll() is None:
+        if self.llm.mcp_server_process and self.llm.mcp_server_process.poll() is None:
             logging.info("[MCP] Headless server already running")
             return
         try:
             if not os.path.exists(MCP_SERVER_FILE):
                 logging.warning(f"[MCP] Server file not found: {MCP_SERVER_FILE}")
                 return
-            self.mcp_server_process = subprocess.Popen(
+            self.llm.mcp_server_process = subprocess.Popen(
                 [sys.executable, MCP_SERVER_FILE, "--no-gui"],
                 cwd=MCP_SERVER_DIR,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
-            logging.info(f"[MCP] Headless server started (PID {self.mcp_server_process.pid})")
+            logging.info(f"[MCP] Headless server started (PID {self.llm.mcp_server_process.pid})")
         except Exception as e:
             logging.error(f"[MCP] Failed to start headless server: {e}")
 
     def stop_mcp_server_headless(self):
         """Stop the headless MCP server subprocess"""
-        if self.mcp_server_process and self.mcp_server_process.poll() is None:
-            self.mcp_server_process.terminate()
+        if self.llm.mcp_server_process and self.llm.mcp_server_process.poll() is None:
+            self.llm.mcp_server_process.terminate()
             try:
-                self.mcp_server_process.wait(timeout=5)
+                self.llm.mcp_server_process.wait(timeout=5)
             except Exception:
-                self.mcp_server_process.kill()
+                self.llm.mcp_server_process.kill()
             logging.info("[MCP] Headless server stopped")
-        self.mcp_server_process = None
+        self.llm.mcp_server_process = None
 
     def update_system_prompt_with_mcp(self, enabled):
         """Toggle MCP connection + start/stop headless server"""
@@ -3767,62 +4287,25 @@ class AIAssistantGUI(QMainWindow):
 
         if enabled:
             # === Start headless MCP server if not already running ===
-            was_running = (self.mcp_server_process is not None and
-                           self.mcp_server_process.poll() is None)
-            self.start_mcp_server_headless()
-            if not self.mcp_connected:
+            was_running = (self.llm.mcp_server_process is not None and
+                           self.llm.mcp_server_process.poll() is None)
+            self.llm.start_mcp_server_headless()
+            if not self.llm.mcp_connected:
                 delay = 0 if was_running else 3000
                 logging.info(f"[MCP] Connecting in {delay}ms...")
-                QTimer.singleShot(delay, self.initialize_mcp_connection)
+                QTimer.singleShot(delay, self.llm.initialize_mcp_connection)
         else:
-            self.mcp_connected = False
-            self.stop_mcp_server_headless()
+            self.llm.mcp_connected = False
+            self.llm.stop_mcp_server_headless()
             logging.info("ℹ️ MCP disabled")
 
     def release_gpu_memory(self):
         """Release GPU Memory"""
+        self.audio.release_whisper()
+        self.tts.release_gpu_memory()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             logging.info("🗑️ GPU memory cleared")
-    
-        # === Reset Faster-Whisper model ===
-        if self.faster_whisper_model is not None:
-            del self.faster_whisper_model
-            self.faster_whisper_model = None
-            self.current_whisper_model = None  
-            logging.info("🗑️ Faster-Whisper model released")
-
-    def get_whisper_model_path(self, model_name):
-        """
-        Returns the path to the local Faster-Whisper model
-        Args:
-            model_name: "tiny", "base", "small", "medium", "large"
-        Returns:
-            Full path to the model folder or None if it does not exist
-        """
-        # === Model name → folder name mapping ===
-        model_folder_map = {
-            "tiny": "tiny",
-            "base": "base", 
-            "small": "small",
-            "medium": "medium",
-            "large": "large-v3"  # === Large uses version v3 === 
-        }
-    
-        folder_name = model_folder_map.get(model_name)
-        if not folder_name:
-            logging.error(f"Unknown Whisper model: {model_name}")
-            return None
-    
-        model_path = os.path.join(WHISPER_MODELS_DIR, folder_name)
-    
-        # === Check if there is model.bin in the folder ===
-        model_bin = os.path.join(model_path, "model.bin")
-        if not os.path.exists(model_bin):
-            logging.error(f"Model file not found: {model_bin}")
-            return None
-    
-        return model_path
 
     def _build_settings_dict(self):
         """
@@ -3875,8 +4358,8 @@ class AIAssistantGUI(QMainWindow):
         Returns True if profile name is valid (not reserved).
         Shows warning and returns False if name is reserved.
         """
-        name = os.path.splitext(os.path.basename(file_path))[0]
-        if name in self.RESERVED_PROFILE_NAMES:
+        if not self.profiles.validate_profile_name(file_path):
+            name = os.path.splitext(os.path.basename(file_path))[0]
             QMessageBox.warning(
                 self, "Reserved Name",
                 f"'{name}' is a reserved profile name and cannot be used.\n"
@@ -3897,12 +4380,9 @@ class AIAssistantGUI(QMainWindow):
         try:
             # === Build dictionary with all settings ===
             settings_dict = self._build_settings_dict()
-        
-            # === Save JSON ===
-            with open(file_path, 'w', encoding='utf-8') as f:
-                json.dump(settings_dict, f, indent=2, ensure_ascii=False)
-        
-            logging.info(f"Settings saved to {file_path}")
+
+            # === Save JSON via ProfileManager ===
+            self.profiles.save_profile(file_path, settings_dict)
             self.profile_modified = False
             QMessageBox.information(self, "Success", f"Settings saved to {file_path}")
 
@@ -3915,7 +4395,7 @@ class AIAssistantGUI(QMainWindow):
             else:
                 # === Same profile name → paths already correct, just reinit to be safe ===
                 self.switch_profile_paths(profile_name)
-                self.reinit_rag_for_profile()
+                self.rag.switch_profile(self.current_rag_dir)
         
         except Exception as e:
             logging.error(f"Error saving settings: {str(e)}")
@@ -3931,27 +4411,8 @@ class AIAssistantGUI(QMainWindow):
                 os.rename(self.current_chat_log, new_chat_log)
                 logging.info(f"✅ Chat History moved → {new_chat_log}")
 
-            # === Stop RAG worker thread ===
-            if self.rag_thread and self.rag_thread.is_alive():
-                self.rag_queue.put(None)
-                self.rag_thread.join(timeout=2)
-                logging.info("✅ RAG worker thread stopped.")
-
-            # === client.reset() — explicitly releases ALL file handles (mmap + SQLite WAL) ===
-            # === This is the only reliable way to unlock chroma.sqlite3 and HNSW .bin files on Windows ===
-            try:
-                if self.rag_client is not None:
-                    self.rag_client.reset()
-                    logging.info("✅ ChromaDB reset() called — all file handles released.")
-                self.rag_collection = None
-                self.rag_client = None
-                gc.collect()
-                time.sleep(0.3)
-                logging.info("✅ ChromaDB client closed.")
-            except Exception as e:
-                logging.error(f"❌ Error during ChromaDB reset: {str(e)}")
-                self.rag_collection = None
-                self.rag_client = None
+            # === Release all RAG file handles before touching the directory on disk ===
+            self.rag.release_for_move()
 
             # === Delete old RAG DB — no move, just delete! ===
             # It will be rebuilt from Chat History at the new profile path
@@ -3965,18 +4426,15 @@ class AIAssistantGUI(QMainWindow):
 
             # === Switch paths to new profile ===
             self.switch_profile_paths(profile_name)
-            self.reinit_rag_for_profile()
+            self.rag.switch_profile(self.current_rag_dir)
 
             # === Restart RAG worker thread ===
-            self.rag_event.clear()
-            self.rag_thread = threading.Thread(target=self.rag_worker, daemon=True)
-            self.rag_thread.start()
-            logging.info("✅ RAG worker thread restarted.")
+            self.rag.start_worker()
 
             # === Rebuild RAG from Chat History ===
             if self.rag_memory_enabled:
                 logging.info("🔄 Rebuilding RAG from Chat History for new profile...")
-                self.rebuild_rag_database()
+                self.rag.rebuild()
 
         except Exception as e:
             logging.error(f"❌ Error saving conversation to profile: {str(e)}")
@@ -3998,7 +4456,7 @@ class AIAssistantGUI(QMainWindow):
         # === STEP 3: Switch to new profile paths and reinit RAG ===
         new_profile_name = os.path.splitext(os.path.basename(file_path))[0]
         self.switch_profile_paths(new_profile_name)
-        self.reinit_rag_for_profile()
+        self.rag.switch_profile(self.current_rag_dir)
 
         # === STEP 4: Load chat history for new profile ===
         self.chat_history = []
@@ -4267,64 +4725,8 @@ class AIAssistantGUI(QMainWindow):
             except Exception as e:
                 logging.error(f"❌ Error clearing chat log file: {str(e)}")
 
-            # === 3. Stop RAG worker thread — it holds a lock on chroma.sqlite3 ===
-            try:
-                if self.rag_thread and self.rag_thread.is_alive():
-                    self.rag_queue.put(None)
-                    self.rag_thread.join(timeout=2)
-                    logging.info("✅ RAG worker thread stopped.")
-            except Exception as e:
-                logging.error(f"❌ Error stopping RAG thread: {str(e)}")
-
-            # === 4. Delete + recreate collection + explicit VACUUM ===
-            # === ChromaDB holds a SQLite connection pool for the entire process lifetime.  ===
-            # === shutil.rmtree() will always fail with WinError 32 while the process runs. ===
-            # === We delete the collection, recreate it fresh, then run VACUUM directly on  ===
-            # === chroma.sqlite3 via Python's sqlite3 module to reclaim the physical space.  ===
-            try:
-                if self.rag_client is not None:
-                    # === Step A: Delete collection — marks all data as free pages in SQLite ===
-                    self.rag_client.delete_collection("chat_memory")
-                    logging.info("✅ RAG collection deleted.")
-
-                    # === Step B: Recreate fresh empty collection ===
-                    self.rag_collection = self.rag_client.create_collection(
-                        name="chat_memory",
-                        metadata={"hnsw:space": "cosine"}
-                    )
-                    self._cleanup_orphaned_rag_folders()
-                    logging.info("✅ Fresh RAG collection created.")
-
-                    # === Step C: Run VACUUM directly on chroma.sqlite3 to reclaim disk space ===
-                    # === SQLite marks deleted pages as free but keeps file size without VACUUM ===
-                    # === We use a separate sqlite3 connection — safe because ChromaDB is idle ===
-                    import sqlite3 as _sqlite3
-                    sqlite_path = os.path.join(self.current_rag_dir, "chroma.sqlite3")
-                    if os.path.exists(sqlite_path):
-                        try:
-                            conn = _sqlite3.connect(sqlite_path)
-                            conn.execute("VACUUM")
-                            conn.close()
-                            size_kb = os.path.getsize(sqlite_path) / 1024
-                            logging.info(f"✅ SQLite VACUUM complete — file size: {size_kb:.1f} KB")
-                        except Exception as ve:
-                            logging.warning(f"⚠️ VACUUM failed (non-critical): {str(ve)}")
-                else:
-                    # === Client not available — full reinit as fallback ===
-                    self.reinit_rag_for_profile()
-                    logging.info("✅ RAG reinitialized (fallback).")
-            except Exception as e:
-                logging.error(f"❌ Error resetting RAG collection: {str(e)}")
-                self.reinit_rag_for_profile()
-
-            # === 5. Restart RAG worker thread ===
-            try:
-                self.rag_event.clear()
-                self.rag_thread = threading.Thread(target=self.rag_worker, daemon=True)
-                self.rag_thread.start()
-                logging.info("✅ RAG worker thread restarted.")
-            except Exception as e:
-                logging.error(f"❌ Error restarting RAG thread: {str(e)}")
+            # === 3. Full RAG reset — encapsulated in RAGManager.clear() ===
+            self.rag.clear()
 
             logging.info("✅ Chat history and RAG database fully reset.")
             QMessageBox.information(
@@ -4373,7 +4775,7 @@ class AIAssistantGUI(QMainWindow):
                 return
     
         # === CHECK 3: RAG System initialized? ===
-        if not self.rag_embedder or not self.rag_collection:
+        if not self.rag.is_ready():
             QMessageBox.critical(
                 self,
                 "RAG System Error",
@@ -4383,7 +4785,7 @@ class AIAssistantGUI(QMainWindow):
             return
     
         # === CONFIRMING REBUILD ===
-        current_docs = self.rag_collection.count()
+        current_docs = self.rag.document_count()
     
         reply = QMessageBox.question(
             self,
@@ -4403,32 +4805,10 @@ class AIAssistantGUI(QMainWindow):
         # === REBUILD PROCESS ===
         try:
             logging.info("🔄 Starting RAG database rebuild...")
-        
-            # === 1. Deletes existent RAG DB ===
-            result = self.rag_collection.get()
-            existing_ids = result.get('ids', [])
-        
-            if existing_ids:
-                self.rag_collection.delete(ids=existing_ids)
-                logging.info(f"🗑️ Cleared {len(existing_ids)} existing documents")
-        
-            # === 2. Indexes all messages from chat_history ===
-            messages_indexed = 0
-        
-            for entry in self.chat_history:
-                role = entry.get('role', 'Unknown')
-                text = entry.get('text', '')
-                timestamp = entry.get('timestamp', datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-            
-                # === Skip empty messages ===
-                if not text.strip():
-                    continue
-            
-                # === IMPORTANT: Indexes ALL roles inclusively MCP Request/Response ===
-                # === Therefor AI "remembers" previous tools/commands ===
-                self.rag_queue.put((role, text, timestamp))
-                messages_indexed += 1
-        
+
+            # === include_mcp=True — AI also "remembers" previous tool calls/results ===
+            messages_indexed = self.rag.rebuild(self.chat_history, include_mcp=True)
+
             logging.info(f"✅ Queued {messages_indexed} messages for indexing")
         
             # === Waits a bit for RAG worker to process ===
@@ -4454,7 +4834,7 @@ class AIAssistantGUI(QMainWindow):
     def show_rebuild_complete(self, expected_count):
         """Callback after rebuild for confirmation"""
         try:
-            actual_count = self.rag_collection.count()
+            actual_count = self.rag.document_count()
         
             QMessageBox.information(
                 self,
@@ -4490,16 +4870,10 @@ class AIAssistantGUI(QMainWindow):
             if entry.get("visible", True):  
                 role = entry['role']
                 text = entry['text']
-            
                 color = "#00B200" if role == "User" else "#FFFF96"
-                self.chat_text.setTextColor(QColor(color))
-                self.chat_text.append(f"{role}: {text}\n")
-    
-        # === Auto scroll to bottom ===
-        cursor = self.chat_text.textCursor()
-        cursor.movePosition(QTextCursor.End)
-        self.chat_text.setTextCursor(cursor)
-        self.chat_text.verticalScrollBar().setValue(self.chat_text.verticalScrollBar().maximum())
+                # === Reuse the same widget-writing logic as append_log() ===
+                # === Same code path whether it's one live message or a full history rebuild ===
+                self._append_chat_safe(role, text, color)
 
     def closeEvent(self, event):
         # === Ask to save if unsaved changes exist ===
@@ -4507,18 +4881,17 @@ class AIAssistantGUI(QMainWindow):
             event.ignore()
             return
 
-        self.tts_event.set()
-        self.stop_event.set()
+        self.tts.stop()
+        self.audio.stop()
         self.stop_tts_stream()    
-        self.rag_event.set()
-        self.rag_queue.put(None)
+        self.rag.stop()
         # === Stop System Monitor worker thread ===
         self.monitor_worker.stop()
         self.monitor_thread.quit()
         self.monitor_thread.wait(2000)
         # === Stop the headless MCP Server if it runs ===
         if self.use_mcp_server:
-            self.stop_mcp_server_headless()
+            self.llm.stop_mcp_server_headless()
             logging.info("[MCP] Server stopped on application close")
         super().closeEvent(event)
 
