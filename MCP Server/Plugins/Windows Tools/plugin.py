@@ -9,6 +9,7 @@ import subprocess
 import datetime
 import os
 import webbrowser
+import difflib
 
 
 # Try pycaw for volume
@@ -55,6 +56,33 @@ SAFE_MEDIA_EXTENSIONS = [
     '.pdf', '.txt', '.docx', '.xlsx', '.pptx',  # Documents
 ]
 
+# Media extensions grouped by type - used by open_media_file for targeted search
+MEDIA_TYPE_MAP = {
+    "photo": ("Pictures", ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']),
+    "video": ("Videos",   ['.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv']),
+    "audio": ("Music",    ['.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a']),
+}
+
+# Standard user folders - enum driven, no raw path input from the LLM
+FOLDER_MAP = {
+    "documents": "Documents",
+    "downloads": "Downloads",
+    "videos":    "Videos",
+    "pictures":  "Pictures",
+    "music":     "Music",
+    "desktop":   "Desktop",
+}
+
+# Built-in Windows utilities - fixed command per tool, shell=False, no user-controlled strings
+SYSTEM_TOOLS_MAP = {
+    "taskmgr":    ["taskmgr"],
+    "calculator": ["calc"],
+    "notepad":    ["notepad"],
+    "paint":      ["mspaint"],
+    "control":    ["control"],
+    "devmgmt":    ["mmc", "devmgmt.msc"],
+}
+
 
 class WindowsToolsPlugin(BasePlugin):
     """Windows system tools with SECURE blacklist system"""
@@ -70,6 +98,9 @@ class WindowsToolsPlugin(BasePlugin):
         if not blacklist:
             # Set default blacklist
             self.set_config("cli_blacklist", DEFAULT_BLACKLIST)
+        
+        # Build Start Menu shortcut index once - powers fuzzy open_app lookups
+        self._build_app_index()
         
         self.log("Activated", "info")
         return True
@@ -428,7 +459,11 @@ class WindowsToolsPlugin(BasePlugin):
             {"name": "windows_media_play", "description": "Play media file", "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}},
             {"name": "windows_cli", "description": "Execute CLI command", "inputSchema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
             {"name": "windows_processes", "description": "List running processes sorted by RAM or CPU usage", "inputSchema": {"type": "object", "properties": {"sort_by": {"type": "string", "enum": ["ram", "cpu"], "default": "ram"}, "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10}}}},
-            {"name": "system_health_check", "description": "System health diagnostics", "inputSchema": {"type": "object", "properties": {}}}
+            {"name": "system_health_check", "description": "System health diagnostics", "inputSchema": {"type": "object", "properties": {}}},
+            {"name": "open_system_tool", "description": "Open a built-in Windows system utility", "inputSchema": {"type": "object", "properties": {"tool": {"type": "string", "enum": ["taskmgr", "calculator", "notepad", "paint", "control", "devmgmt"]}}, "required": ["tool"]}},
+            {"name": "open_app", "description": "Open an installed application by name, fuzzy-matched against Start Menu shortcuts", "inputSchema": {"type": "object", "properties": {"app_name": {"type": "string", "description": "Name of the application, e.g. 'blender', 'discord', 'lm studio'"}}, "required": ["app_name"]}},
+            {"name": "open_folder", "description": "Open a standard user folder in File Explorer", "inputSchema": {"type": "object", "properties": {"folder": {"type": "string", "enum": ["documents", "downloads", "videos", "pictures", "music", "desktop"]}}, "required": ["folder"]}},
+            {"name": "open_media_file", "description": "Search for a photo, video, or audio file by name. Falls back to Downloads if not found in the standard folder. Returns a list of matches - use windows_media_play with the chosen path to open it.", "inputSchema": {"type": "object", "properties": {"query": {"type": "string", "description": "Filename or partial filename to search for"}, "media_type": {"type": "string", "enum": ["photo", "video", "audio"]}}, "required": ["query", "media_type"]}}
         ]
         
         return tools
@@ -470,6 +505,26 @@ class WindowsToolsPlugin(BasePlugin):
 - system_volume_get: Get current volume level
 - windows_media_play: Play media files in default player (arguments: path)
 
+=== LAUNCHERS (apps, folders, media search) ===
+- open_system_tool: Open a built-in Windows utility
+  * Arguments: tool (enum: taskmgr, calculator, notepad, paint, control, devmgmt)
+  * Instant - no search needed, use this for these 6 utilities specifically
+
+- open_app: Open an installed application by name
+  * Arguments: app_name (free text, e.g. "blender", "discord", "lm studio")
+  * Fuzzy-matched against Start Menu shortcuts - works for any installed program
+  * Use this for anything NOT in the open_system_tool list
+
+- open_folder: Open a standard user folder in File Explorer
+  * Arguments: folder (enum: documents, downloads, videos, pictures, music, desktop)
+
+- open_media_file: Search for a photo, video, or audio file by name
+  * Arguments: query (filename to search for), media_type (enum: photo, video, audio)
+  * Searches the matching folder (Pictures/Videos/Music), falls back to Downloads if nothing found
+  * Returns a LIST of matches - does NOT open the file itself
+  * If there's more than one match, ask the user which one they want
+  * Then call windows_media_play with the chosen "path" from the results to actually open it
+
 WINDOWS TOOLS USAGE EXAMPLES:
 
 User: "What's hogging up all my RAM?"
@@ -498,6 +553,20 @@ User: "Play this music file: C:\\Music\\song.mp3"
 
 User: "Get complete system info"
 → {"id": "call_9", "tool": "system_info", "arguments": {}}
+
+User: "Open Task Manager"
+→ {"id": "call_10", "tool": "open_system_tool", "arguments": {"tool": "taskmgr"}}
+
+User: "Open Blender"
+→ {"id": "call_11", "tool": "open_app", "arguments": {"app_name": "blender"}}
+
+User: "Open my Downloads folder"
+→ {"id": "call_12", "tool": "open_folder", "arguments": {"folder": "downloads"}}
+
+User: "Find the photo of my Kugoo scooter"
+→ {"id": "call_13", "tool": "open_media_file", "arguments": {"query": "kugoo", "media_type": "photo"}}
+Results come back with 2 matches → ask user which one, then:
+→ {"id": "call_14", "tool": "windows_media_play", "arguments": {"path": "<path_from_chosen_match>"}}
 """
         
         return prompt
@@ -535,6 +604,14 @@ User: "Get complete system info"
                 result = self._list_processes(arguments)
             elif tool_name == "system_health_check":
                 result = self._health_check()
+            elif tool_name == "open_system_tool":
+                result = self._open_system_tool(arguments.get("tool", ""))
+            elif tool_name == "open_app":
+                result = self._open_app(arguments)
+            elif tool_name == "open_folder":
+                result = self._open_folder(arguments)
+            elif tool_name == "open_media_file":
+                result = self._open_media_file(arguments)
             else:
                 result = {"ok": False, "error": f"Unknown tool: {tool_name}"}
             
@@ -898,3 +975,142 @@ User: "Get complete system info"
             
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+    # ============ APP / FOLDER / MEDIA LAUNCHER ============
+
+    def _build_app_index(self):
+        """
+        Scan Start Menu shortcuts ONCE at activation - powers fuzzy open_app lookups.
+        This mirrors what Windows itself uses to populate its own Start Menu search,
+        so it's always in sync with what's actually installed - no slow recursive
+        Program Files scan needed.
+        """
+        self.app_index = {}
+        start_menu_paths = [
+            os.path.join(os.environ.get("ProgramData", ""), "Microsoft", "Windows", "Start Menu", "Programs"),
+            os.path.join(os.environ.get("APPDATA", ""), "Microsoft", "Windows", "Start Menu", "Programs"),
+        ]
+
+        for base_path in start_menu_paths:
+            if not os.path.exists(base_path):
+                continue
+            try:
+                for root, dirs, files in os.walk(base_path):
+                    for file in files:
+                        if file.lower().endswith(".lnk"):
+                            app_name = os.path.splitext(file)[0]
+                            self.app_index[app_name.lower()] = os.path.join(root, file)
+            except Exception as e:
+                self.log(f"Error scanning {base_path}: {e}", "warning")
+
+        self.log(f"App index built: {len(self.app_index)} shortcuts found", "info")
+
+    def _open_system_tool(self, tool_name):
+        """🔒 SECURE: Fixed command list per enum value, shell=False, no user-controlled string reaches subprocess"""
+        if tool_name not in SYSTEM_TOOLS_MAP:
+            return {"ok": False, "error": f"Unknown system tool: {tool_name}. Valid options: {', '.join(SYSTEM_TOOLS_MAP.keys())}"}
+
+        try:
+            subprocess.Popen(SYSTEM_TOOLS_MAP[tool_name], shell=False)
+            return {"ok": True, "message": f"Opening {tool_name}..."}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def _open_app(self, args):
+        """🔒 SECURE: Fuzzy-match against the pre-built Start Menu index, launch via os.startfile on the .lnk"""
+        app_name = args.get("app_name", "").strip()
+
+        if not app_name:
+            return {"ok": False, "error": "No app_name provided"}
+
+        if not self.app_index:
+            return {"ok": False, "error": "App index is empty - no Start Menu shortcuts were found on this system"}
+
+        matches = difflib.get_close_matches(app_name.lower(), self.app_index.keys(), n=1, cutoff=0.5)
+
+        if not matches:
+            return {"ok": False, "error": f"No installed app found matching '{app_name}'"}
+
+        matched_name   = matches[0]
+        shortcut_path  = self.app_index[matched_name]
+
+        try:
+            os.startfile(shortcut_path)
+            return {"ok": True, "message": f"Opening {matched_name}..."}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def _open_folder(self, args):
+        """Open a standard user folder in Explorer - enum driven, no raw path from the LLM"""
+        folder_key = args.get("folder", "").lower()
+
+        if folder_key not in FOLDER_MAP:
+            return {"ok": False, "error": f"Unknown folder: {folder_key}. Valid options: {', '.join(FOLDER_MAP.keys())}"}
+
+        folder_path = os.path.join(os.path.expanduser("~"), FOLDER_MAP[folder_key])
+
+        if not os.path.exists(folder_path):
+            return {"ok": False, "error": f"Folder not found: {folder_path}"}
+
+        try:
+            os.startfile(folder_path)
+            return {"ok": True, "message": f"Opened {FOLDER_MAP[folder_key]} folder"}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def _search_media_in_folder(self, folder, query, extensions):
+        """Non-recursive search of a single folder for files matching query + extensions"""
+        results = []
+        if not os.path.exists(folder):
+            return results
+        try:
+            for filename in os.listdir(folder):
+                full_path = os.path.join(folder, filename)
+                if not os.path.isfile(full_path):
+                    continue
+                name_no_ext, ext = os.path.splitext(filename)
+                if ext.lower() in extensions and query in name_no_ext.lower():
+                    results.append({"filename": filename, "path": full_path})
+        except Exception as e:
+            self.log(f"Error searching {folder}: {e}", "warning")
+        return results
+
+    def _open_media_file(self, args):
+        """
+        Search for a media file by name in its standard folder (Pictures/Videos/Music),
+        with Downloads as fallback if nothing is found there.
+        Returns a list of matches - the LLM should then call windows_media_play
+        with the chosen path to actually open the file.
+        """
+        query      = args.get("query", "").strip().lower()
+        media_type = args.get("media_type", "")
+
+        if not query:
+            return {"ok": False, "error": "No search query provided"}
+
+        if media_type not in MEDIA_TYPE_MAP:
+            return {"ok": False, "error": f"Invalid media_type. Must be one of: {', '.join(MEDIA_TYPE_MAP.keys())}"}
+
+        primary_folder_name, extensions = MEDIA_TYPE_MAP[media_type]
+        home            = os.path.expanduser("~")
+        primary_folder  = os.path.join(home, primary_folder_name)
+
+        matches = self._search_media_in_folder(primary_folder, query, extensions)
+
+        # === Fallback to Downloads only if the primary folder had no matches ===
+        searched_downloads = False
+        if not matches:
+            downloads_folder = os.path.join(home, "Downloads")
+            matches = self._search_media_in_folder(downloads_folder, query, extensions)
+            searched_downloads = True
+
+        if not matches:
+            return {"ok": False, "error": f"No {media_type} files matching '{query}' found in {primary_folder_name} or Downloads"}
+
+        return {
+            "ok": True,
+            "matches": matches,
+            "count": len(matches),
+            "searched_downloads_fallback": searched_downloads,
+            "message": f"Found {len(matches)} matching file(s). Ask the user which one if there are multiple, then call windows_media_play with the chosen path."
+        }
