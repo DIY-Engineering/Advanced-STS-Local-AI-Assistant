@@ -1,6 +1,6 @@
 {
   "name": "windows_tools",
-  "version": "0.1.1 Beta",
+  "version": "0.1.2 Beta",
   "display_name": "Windows Tools",
   "description": "System information, CLI execution, media control, health checks",
   "author": "Nechifor Marian",
