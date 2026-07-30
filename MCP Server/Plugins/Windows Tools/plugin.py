@@ -56,11 +56,12 @@ SAFE_MEDIA_EXTENSIONS = [
     '.pdf', '.txt', '.docx', '.xlsx', '.pptx',  # Documents
 ]
 
-# Media extensions grouped by type - used by open_media_file for targeted search
+# Media extensions grouped by type - open_media_file now searches ALL standard
+# folders simultaneously (non-recursive), so no "primary folder" per type is needed anymore
 MEDIA_TYPE_MAP = {
-    "photo": ("Pictures", ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']),
-    "video": ("Videos",   ['.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv']),
-    "audio": ("Music",    ['.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a']),
+    "photo": ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'],
+    "video": ['.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv'],
+    "audio": ['.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a'],
 }
 
 # Standard user folders - enum driven, no raw path input from the LLM
@@ -73,6 +74,19 @@ FOLDER_MAP = {
     "desktop":   "Desktop",
 }
 
+# Same 6 folders as a flat list - used for open_media_file's simultaneous search
+# AND as the security boundary for get_file_details / read_text_file (prevents
+# reading arbitrary system paths like .ssh keys or browser profile data)
+STANDARD_USER_FOLDERS = ["Desktop", "Documents", "Downloads", "Music", "Pictures", "Videos"]
+
+# Text file extensions readable via read_text_file - kept deliberately small,
+# no Office/PDF parsing to avoid adding new dependencies (python-docx, PyPDF2, etc.)
+TEXT_FILE_EXTENSIONS = ['.txt', '.md', '.csv', '.json', '.log', '.py']
+
+# Hard cap on read_text_file - protects context window and avoids surprise
+# cloud/token costs once this content can be routed to a cloud LLM later
+MAX_TEXT_FILE_SIZE = 50 * 1024  # 50 KB
+
 # Built-in Windows utilities - fixed command per tool, shell=False, no user-controlled strings
 SYSTEM_TOOLS_MAP = {
     "taskmgr":    ["taskmgr"],
@@ -82,6 +96,7 @@ SYSTEM_TOOLS_MAP = {
     "control":    ["control"],
     "devmgmt":    ["mmc", "devmgmt.msc"],
 }
+
 
 
 class WindowsToolsPlugin(BasePlugin):
@@ -463,7 +478,9 @@ class WindowsToolsPlugin(BasePlugin):
             {"name": "open_system_tool", "description": "Open a built-in Windows system utility", "inputSchema": {"type": "object", "properties": {"tool": {"type": "string", "enum": ["taskmgr", "calculator", "notepad", "paint", "control", "devmgmt"]}}, "required": ["tool"]}},
             {"name": "open_app", "description": "Open an installed application by name, fuzzy-matched against Start Menu shortcuts", "inputSchema": {"type": "object", "properties": {"app_name": {"type": "string", "description": "Name of the application, e.g. 'blender', 'discord', 'lm studio'"}}, "required": ["app_name"]}},
             {"name": "open_folder", "description": "Open a standard user folder in File Explorer", "inputSchema": {"type": "object", "properties": {"folder": {"type": "string", "enum": ["documents", "downloads", "videos", "pictures", "music", "desktop"]}}, "required": ["folder"]}},
-            {"name": "open_media_file", "description": "Search for a photo, video, or audio file by name. Falls back to Downloads if not found in the standard folder. Returns a list of matches - use windows_media_play with the chosen path to open it.", "inputSchema": {"type": "object", "properties": {"query": {"type": "string", "description": "Filename or partial filename to search for"}, "media_type": {"type": "string", "enum": ["photo", "video", "audio"]}}, "required": ["query", "media_type"]}}
+            {"name": "open_media_file", "description": "Search for a photo, video, or audio file by name across all standard user folders (Desktop, Documents, Downloads, Music, Pictures, Videos). Returns a list of matches - use windows_media_play with the chosen path to open it.", "inputSchema": {"type": "object", "properties": {"query": {"type": "string", "description": "Filename or partial filename to search for"}, "media_type": {"type": "string", "enum": ["photo", "video", "audio"]}}, "required": ["query", "media_type"]}},
+            {"name": "get_file_details", "description": "Get metadata for a file (size, extension, created/modified dates) without reading its content. Read-only. Provide EITHER 'path' (e.g. from open_media_file results) OR 'folder' + 'filename' (preferred when you don't already have a full path - avoids guessing the Windows username).", "inputSchema": {"type": "object", "properties": {"path": {"type": "string", "description": "Full path to the file, e.g. from open_media_file results"}, "folder": {"type": "string", "enum": ["documents", "downloads", "videos", "pictures", "music", "desktop"], "description": "Standard folder - use with filename instead of guessing a full path"}, "filename": {"type": "string", "description": "Filename within the folder, e.g. 'readme.md'"}}}},
+            {"name": "read_text_file", "description": "Read the text content of a small file (.txt, .md, .csv, .json, .log, .py) from a standard user folder. Max 50 KB. Provide EITHER 'path' (e.g. from open_media_file results) OR 'folder' + 'filename' (preferred when you don't already have a full path - avoids guessing the Windows username).", "inputSchema": {"type": "object", "properties": {"path": {"type": "string", "description": "Full path to the text file"}, "folder": {"type": "string", "enum": ["documents", "downloads", "videos", "pictures", "music", "desktop"], "description": "Standard folder - use with filename instead of guessing a full path"}, "filename": {"type": "string", "description": "Filename within the folder, e.g. 'todo.txt'"}}}}
         ]
         
         return tools
@@ -520,10 +537,26 @@ class WindowsToolsPlugin(BasePlugin):
 
 - open_media_file: Search for a photo, video, or audio file by name
   * Arguments: query (filename to search for), media_type (enum: photo, video, audio)
-  * Searches the matching folder (Pictures/Videos/Music), falls back to Downloads if nothing found
+  * Searches ALL standard folders at once (Desktop, Documents, Downloads, Music, Pictures, Videos)
   * Returns a LIST of matches - does NOT open the file itself
   * If there's more than one match, ask the user which one they want
   * Then call windows_media_play with the chosen "path" from the results to actually open it
+
+=== FILE DETAILS & TEXT READING ===
+- get_file_details: Get metadata for a file - size, extension, created/modified dates
+  * Arguments: EITHER path (full path, e.g. from open_media_file results)
+               OR folder (enum: documents/downloads/videos/pictures/music/desktop) + filename
+  * PREFER folder + filename when the user just names a file - NEVER guess the
+    Windows account folder name (it's often NOT the same as the person's first
+    name in conversation, e.g. account folder "Nechifor Marian" vs chat name "Marian")
+  * Read-only, no content returned - just metadata
+
+- read_text_file: Read the text content of a small file
+  * Arguments: EITHER path (full path to a .txt/.md/.csv/.json/.log/.py file)
+               OR folder (enum: documents/downloads/videos/pictures/music/desktop) + filename
+  * Same rule as above: PREFER folder + filename, never guess the account folder name
+  * Scoped to standard user folders only, max 50 KB
+  * Use this when the user wants to know what's IN a file, not just its size/dates
 
 WINDOWS TOOLS USAGE EXAMPLES:
 
@@ -567,6 +600,12 @@ User: "Find the photo of my Kugoo scooter"
 → {"id": "call_13", "tool": "open_media_file", "arguments": {"query": "kugoo", "media_type": "photo"}}
 Results come back with 2 matches → ask user which one, then:
 → {"id": "call_14", "tool": "windows_media_play", "arguments": {"path": "<path_from_chosen_match>"}}
+
+User: "How big is that notes.txt file on my Desktop?"
+→ {"id": "call_15", "tool": "get_file_details", "arguments": {"folder": "desktop", "filename": "notes.txt"}}
+
+User: "What's written in my todo.txt on the desktop?"
+→ {"id": "call_16", "tool": "read_text_file", "arguments": {"folder": "desktop", "filename": "todo.txt"}}
 """
         
         return prompt
@@ -612,6 +651,10 @@ Results come back with 2 matches → ask user which one, then:
                 result = self._open_folder(arguments)
             elif tool_name == "open_media_file":
                 result = self._open_media_file(arguments)
+            elif tool_name == "get_file_details":
+                result = self._get_file_details(arguments)
+            elif tool_name == "read_text_file":
+                result = self._read_text_file(arguments)
             else:
                 result = {"ok": False, "error": f"Unknown tool: {tool_name}"}
             
@@ -1077,8 +1120,11 @@ Results come back with 2 matches → ask user which one, then:
 
     def _open_media_file(self, args):
         """
-        Search for a media file by name in its standard folder (Pictures/Videos/Music),
-        with Downloads as fallback if nothing is found there.
+        Search for a media file by name across ALL standard user folders
+        (Desktop, Documents, Downloads, Music, Pictures, Videos) at once.
+        Non-recursive per folder - fast, and avoids triggering OneDrive
+        Files On-Demand downloads (a listdir/isfile pass does not force a
+        cloud-only file to download; only opening its content would).
         Returns a list of matches - the LLM should then call windows_media_play
         with the chosen path to actually open the file.
         """
@@ -1091,26 +1137,161 @@ Results come back with 2 matches → ask user which one, then:
         if media_type not in MEDIA_TYPE_MAP:
             return {"ok": False, "error": f"Invalid media_type. Must be one of: {', '.join(MEDIA_TYPE_MAP.keys())}"}
 
-        primary_folder_name, extensions = MEDIA_TYPE_MAP[media_type]
-        home            = os.path.expanduser("~")
-        primary_folder  = os.path.join(home, primary_folder_name)
+        extensions = MEDIA_TYPE_MAP[media_type]
 
-        matches = self._search_media_in_folder(primary_folder, query, extensions)
+        # === Strip any extension the LLM might have included (e.g. "audacity.png") ===
+        # === _search_media_in_folder matches against the filename WITHOUT its  ===
+        # === extension, so the query must be normalized the same way to match. ===
+        # === Only strips if it's actually a known extension for this media_type ===
+        # === avoids mangling legitimate dots in a filename (e.g. "v1.2 photo") ===
+        _, query_ext = os.path.splitext(query)
+        if query_ext.lower() in extensions:
+            query = query[:-len(query_ext)]
 
-        # === Fallback to Downloads only if the primary folder had no matches ===
-        searched_downloads = False
-        if not matches:
-            downloads_folder = os.path.join(home, "Downloads")
-            matches = self._search_media_in_folder(downloads_folder, query, extensions)
-            searched_downloads = True
+        home       = os.path.expanduser("~")
 
-        if not matches:
-            return {"ok": False, "error": f"No {media_type} files matching '{query}' found in {primary_folder_name} or Downloads"}
+        all_matches = []
+        for folder_name in STANDARD_USER_FOLDERS:
+            folder_path = os.path.join(home, folder_name)
+            for match in self._search_media_in_folder(folder_path, query, extensions):
+                match["folder"] = folder_name
+                all_matches.append(match)
+
+        if not all_matches:
+            searched = ", ".join(STANDARD_USER_FOLDERS)
+            return {"ok": False, "error": f"No {media_type} files matching '{query}' found in any of: {searched}"}
 
         return {
             "ok": True,
-            "matches": matches,
-            "count": len(matches),
-            "searched_downloads_fallback": searched_downloads,
-            "message": f"Found {len(matches)} matching file(s). Ask the user which one if there are multiple, then call windows_media_play with the chosen path."
+            "matches": all_matches,
+            "count": len(all_matches),
+            "message": f"Found {len(all_matches)} matching file(s). Ask the user which one if there are multiple, then call windows_media_play with the chosen path."
         }
+
+    # ============ FILE DETAILS / TEXT READING ============
+
+    def _is_path_in_standard_folders(self, path):
+        """
+        🔒 SECURE: Resolves the path (defeats '..' traversal tricks and symlinks)
+        and checks it actually lives inside one of the 6 standard user folders.
+        Prevents get_file_details / read_text_file from reaching arbitrary
+        system paths like .ssh keys, browser profile data, or saved credentials.
+        """
+        try:
+            home          = os.path.expanduser("~")
+            resolved_path = os.path.realpath(path)
+
+            for folder_name in STANDARD_USER_FOLDERS:
+                folder_path = os.path.realpath(os.path.join(home, folder_name))
+                if resolved_path == folder_path or resolved_path.startswith(folder_path + os.sep):
+                    return True
+            return False
+        except Exception:
+            return False
+
+    def _resolve_target_path(self, args):
+        """
+        Resolve either an explicit 'path' or a 'folder' + 'filename' pair into
+        a usable path string. The folder+filename form is the SAFE default for
+        the LLM: it builds the path via os.path.expanduser("~") internally, so
+        the model never has to guess the Windows account folder name (which is
+        often NOT the same as the person's first name in conversation, e.g.
+        the account folder can be "Nechifor Marian" while the user just goes
+        by "Marian" in chat).
+        Returns (path, error_message) - error_message is None on success.
+        """
+        path       = args.get("path", "").strip()
+        folder_key = args.get("folder", "").strip().lower()
+        filename   = args.get("filename", "").strip()
+
+        if not path and folder_key and filename:
+            if folder_key not in FOLDER_MAP:
+                return None, f"Unknown folder: {folder_key}. Valid options: {', '.join(FOLDER_MAP.keys())}"
+            path = os.path.join(os.path.expanduser("~"), FOLDER_MAP[folder_key], filename)
+
+        if not path:
+            return None, "Provide either 'path', or both 'folder' and 'filename'"
+
+        return path, None
+
+    def _human_readable_size(self, size_bytes):
+        """Format a byte count as a human-readable string (e.g. '482.3 KB')"""
+        size = float(size_bytes)
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if size < 1024:
+                return f"{size:.1f} {unit}" if unit != 'B' else f"{int(size)} {unit}"
+            size /= 1024
+        return f"{size:.1f} TB"
+
+    def _get_file_details(self, args):
+        """Read-only metadata for a single file - size, extension, timestamps. No content."""
+        path, error = self._resolve_target_path(args)
+        if error:
+            return {"ok": False, "error": error}
+
+        if not self._is_path_in_standard_folders(path):
+            return {"ok": False, "error": f"Path must be inside one of: {', '.join(STANDARD_USER_FOLDERS)}"}
+
+        if not os.path.exists(path) or not os.path.isfile(path):
+            return {"ok": False, "error": f"File not found: {path}"}
+
+        try:
+            stat = os.stat(path)
+            _, ext = os.path.splitext(path)
+
+            return {
+                "ok": True,
+                "path": path,
+                "filename": os.path.basename(path),
+                "extension": ext,
+                "size_bytes": stat.st_size,
+                "size_human": self._human_readable_size(stat.st_size),
+                "created":  datetime.datetime.fromtimestamp(stat.st_ctime).strftime("%Y-%m-%d %H:%M:%S"),
+                "modified": datetime.datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def _read_text_file(self, args):
+        """
+        Read the text content of a small file (.txt/.md/.csv/.json/.log/.py).
+        Scoped to the 6 standard user folders, capped at MAX_TEXT_FILE_SIZE.
+        Note: this is the one tool in the plugin that actually opens file
+        content - on a OneDrive-synced folder with Files On-Demand, this can
+        trigger a cloud download for a placeholder file (search/details do not).
+        """
+        path, error = self._resolve_target_path(args)
+        if error:
+            return {"ok": False, "error": error}
+
+        if not self._is_path_in_standard_folders(path):
+            return {"ok": False, "error": f"Path must be inside one of: {', '.join(STANDARD_USER_FOLDERS)}"}
+
+        if not os.path.exists(path) or not os.path.isfile(path):
+            return {"ok": False, "error": f"File not found: {path}"}
+
+        _, ext = os.path.splitext(path)
+        if ext.lower() not in TEXT_FILE_EXTENSIONS:
+            return {"ok": False, "error": f"Unsupported file type '{ext}'. Supported: {', '.join(TEXT_FILE_EXTENSIONS)}"}
+
+        try:
+            size_bytes = os.path.getsize(path)
+            if size_bytes > MAX_TEXT_FILE_SIZE:
+                return {
+                    "ok": False,
+                    "error": f"File too large ({self._human_readable_size(size_bytes)}). "
+                             f"Max supported: {self._human_readable_size(MAX_TEXT_FILE_SIZE)}"
+                }
+
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+
+            return {
+                "ok": True,
+                "path": path,
+                "filename": os.path.basename(path),
+                "size_bytes": size_bytes,
+                "content": content
+            }
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
