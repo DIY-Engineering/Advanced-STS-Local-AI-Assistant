@@ -445,6 +445,76 @@ class ProfileManager:
             logging.error(f"Error deleting profile '{profile_name}': {str(e)}")
             return False
 
+    # =========================
+    # === CHAT LOG PARSING ===
+    # =========================
+
+    def is_timestamp_line(self, line):
+        """Check if line begins with a valid timestamp (YYYY-MM-DD HH:MM:SS)."""
+        pattern = r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} '
+        return bool(re.match(pattern, line))
+
+    def parse_chat_file(self, lines, include_mcp=True):
+        """
+        Parses a list of chat log lines into a list of message dicts.
+        Single source of truth for chat log parsing — pure function, no GUI dependency.
+
+        Args:
+            lines:       readlines() output from a chat log file
+            include_mcp: if True, includes MCP Request/Response with visible=False
+                         if False, includes only User/Assistant (no 'visible' key)
+        Returns:
+            List of message dicts, sorted chronologically
+        """
+        valid_roles = ["User", "Assistant", "MCP Request", "MCP Response"] if include_mcp else ["User", "Assistant"]
+        messages = []
+        i = 0
+
+        while i < len(lines):
+            line = lines[i].strip()
+
+            if not line:
+                i += 1
+                continue
+
+            if self.is_timestamp_line(line):
+                try:
+                    parts = line.split(" ", 2)
+                    if len(parts) >= 3:
+                        timestamp = f"{parts[0]} {parts[1]}"
+                        rest = parts[2]
+
+                        if ": " in rest:
+                            role, text = rest.split(": ", 1)
+
+                            if role in valid_roles:
+                                full_text = text
+                                i += 1
+
+                                # === Accumulate continuation lines ===
+                                while i < len(lines):
+                                    next_line = lines[i]
+                                    if next_line.strip() and self.is_timestamp_line(next_line.strip()):
+                                        break
+                                    full_text += "\n" + next_line.rstrip()
+                                    i += 1
+
+                                full_text = full_text.strip()
+
+                                entry = {"timestamp": timestamp, "role": role, "text": full_text}
+                                if include_mcp:
+                                    entry["visible"] = role not in ["MCP Request", "MCP Response"]
+                                messages.append(entry)
+                                continue
+
+                except Exception as e:
+                    logging.warning(f"Skipping malformed line: {line[:50]}... Error: {e}")
+
+            i += 1
+
+        messages.sort(key=lambda x: x.get('timestamp', ''))
+        return messages
+
 
 class RAGManager:
     """
@@ -1816,6 +1886,26 @@ class LLMClient:
             logging.error(f"Chain LLM error: {str(e)}")
             return None
 
+    def list_models(self, timeout=3):
+        """
+        Fetch available models from LM Studio's /v1/models endpoint.
+        Returns: list of model id strings, or None on failure (server not reachable).
+        Pure network call — GUI is responsible for populating/handling the dropdown.
+        """
+        try:
+            cfg      = self.get_config()
+            base_url = cfg["lm_server"].rstrip('/')
+            response = requests.get(f"{base_url}/v1/models", timeout=timeout)
+
+            if response.status_code == 200:
+                data = response.json()
+                return [model["id"] for model in data.get("data", [])]
+
+            return None
+
+        except Exception:
+            return None
+
     # ===============================
     # === MCP JSON-RPC 2.0 CLIENT ===
     # ===============================
@@ -1885,7 +1975,7 @@ class LLMClient:
             init_result = self.mcp_request_with_retry("initialize", {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "clientInfo": {"name": "Advanced-STS-Local-AI-Assistant", "version": "0.1.7 Beta"}
+                "clientInfo": {"name": "Advanced-STS-Local-AI-Assistant", "version": "0.1.8 Beta"}
             })
 
             if not init_result:
@@ -2040,7 +2130,19 @@ class LLMClient:
         return clean_response
 
     def build_mcp_follow_up_prompt(self, original_query, tool_results):
-        """Build follow-up prompt from Tool Chain Rules.md template."""
+        """
+        Build follow-up prompt for MCP chain execution.
+        Workflow instructions are loaded dynamically from every *.md "skill" file
+        in /MCP Skills/ - one file per plugin (e.g. "Windows Tools.md", "Google Services.md").
+        Installing a new plugin just means dropping its skill file in that folder;
+        no code change needed here to pick it up.
+
+        Note: this function's code runs top to bottom like any Python function,
+        but the ORDER OF THE TEXT SEEN BY THE MODEL is decided only by the final
+        `return header + workflows_text + footer` line below — not by where each
+        piece is built above it. header/footer/workflows_text are just plain
+        strings sitting in memory until that line glues them together.
+        """
         results_text = ""
         for item in tool_results:
             tool_name = item['tool']
@@ -2050,16 +2152,72 @@ class LLMClient:
             else:
                 results_text += f"\n❌ {tool_name} FAILED:\n{result.get('error', 'Unknown error')}\n"
 
-        rules_path = os.path.join(BASE_DIR, "MCP", "Tool Chain Rules.md")
-        template   = open(rules_path, "r", encoding="utf-8").read()
-        template   = template.replace("\\_", "_")
+        separator = "=" * 60
 
-        # === Use replace() — avoids conflicts with JSON braces in template ===
-        prompt = template
-        prompt = prompt.replace("{separator}",      "=" * 60)
-        prompt = prompt.replace("{original_query}", original_query)
-        prompt = prompt.replace("{results_text}",   results_text)
-        return prompt
+        # === Fixed protocol header ( not specific to any plugin ) ===
+
+        header = f"""TOOL EXECUTION RESULTS
+{separator}
+
+Original user query: "{original_query}"
+
+Tool execution results:
+{results_text}
+
+{separator}
+INSTRUCTIONS:
+{separator}
+
+You are in the middle of a multi-step tool execution flow.
+Read the results above carefully, then decide what to do next.
+
+GOLDEN RULE:
+→ If you need to call ANOTHER tool — respond with JSON only, nothing else.
+→ If you have ALL the information needed — respond in plain text, NO JSON.
+→ If a tool returned an error — DO NOT invent your own recovery steps.
+  Only retry with a DIFFERENT tool call if a workflow below explicitly says so.
+  Otherwise, just tell the user what went wrong in plain text.
+
+{separator}
+WORKFLOWS:
+{separator}
+
+"""
+
+        # === Fixed protocol footer ( not specific to any plugin ) ===
+
+        footer = f"""
+
+{separator}
+RESPONSE FORMAT REMINDER:
+{separator}
+
+NEXT TOOL CALL   → JSON only:  {{"id": "call_N", "tool": "tool_name", "arguments": {{...}}}}
+FINAL ANSWER     → Plain text only. Never mix JSON and text in the same response.
+
+NOW respond based on the results above:"""
+
+        # === Load every skill file from /MCP Skills/ — one per installed plugin ===
+        # === Alphabetical order keeps the assembled prompt deterministic ===
+
+        skills_dir   = os.path.join(BASE_DIR, "MCP Skills")
+        skill_blocks = []
+
+        if os.path.exists(skills_dir):
+            skill_files = sorted(f for f in os.listdir(skills_dir) if f.lower().endswith(".md"))
+            for filename in skill_files:
+                try:
+                    with open(os.path.join(skills_dir, filename), "r", encoding="utf-8") as f:
+                        content = f.read()
+                    content = content.replace("\\_", "_")  # === Markdown auto-escapes underscores ===
+                    skill_blocks.append(content.strip())
+                except Exception as e:
+                    logging.warning(f"Could not load skill file '{filename}': {e}")
+
+        workflows_text = "\n\n".join(skill_blocks)
+
+        # === Only HERE does the order of header/workflows_text/footer actually matter ===
+        return header + workflows_text + footer
 
     def execute_mcp_tool(self, tool_call):
         """Execute a single MCP tool call via JSON-RPC."""
@@ -2187,7 +2345,7 @@ class AIAssistantGUI(QMainWindow):
         super().__init__()
         
         # ====== INITIALIZE GUI ======
-        self.setWindowTitle("= Advanced STS Local AI Assistant 0.1.7 Beta =")
+        self.setWindowTitle("= Advanced STS Local AI Assistant 0.1.8 Beta =")
         self.setGeometry(0, 0, 1326, 663)
         self.setFixedSize(1326, 663)
         
@@ -3965,69 +4123,53 @@ class AIAssistantGUI(QMainWindow):
 
     def load_lm_models(self):
         logging.info("Loading LM Studio models")
-        try:
-            base_url = self.lm_server_entry.text().rstrip('/') # === Take URL-ul from GUI, safer this way ===
-            if not base_url:
-                base_url = "http://127.0.0.1:1234"
-                
-            models_url = f"{base_url}/v1/models"
-            
-            # === We add timeout 3 seconds so that the application does not freeze at startup ===
-            response = requests.get(models_url, timeout=3)
-            
-            if response.status_code == 200:
-                data = response.json()
-                models = [model["id"] for model in data["data"]]
-                
-                # === OPTIMAL REFRESH LOGIC ===
-                current_selection = self.lm_model_dropdown.currentText()
-                self.lm_model_dropdown.blockSignals(True)
-                self.lm_model_dropdown.clear()
-                
-                if models:
-                    self.lm_model_dropdown.addItems(models)
-                    if current_selection in models:
-                        self.lm_model_dropdown.setCurrentText(current_selection)
-                    else:
-                        self.lm_model_dropdown.setCurrentIndex(0)
-                        self.selected_lm_model = models[0]
-                    logging.info(f"LM Studio models loaded: {models}")
-                else:
-                    self.lm_model_dropdown.addItem("No loaded models")
-                    logging.warning("No loaded LM Studio models")
-            
-            self.lm_model_dropdown.blockSignals(False)
 
-        except Exception as e:
-            # === Only displays a friendly error message without error code ===
+        models = self.llm.list_models(timeout=3)
+
+        if models is None:
+            # === Server not reachable — friendly warning, no error code ===
             lm_url = self.lm_server_entry.text().strip() or "http://127.0.0.1:1234"
             logging.warning(f"⚠️ Turn on LM Studio and open server on: {lm_url}")
             if self.lm_model_dropdown.count() == 0:
-                 self.lm_model_dropdown.addItem("No loaded models")
+                self.lm_model_dropdown.addItem("No loaded models")
+            return
+
+        # === OPTIMAL REFRESH LOGIC ===
+        current_selection = self.lm_model_dropdown.currentText()
+        self.lm_model_dropdown.blockSignals(True)
+        self.lm_model_dropdown.clear()
+
+        if models:
+            self.lm_model_dropdown.addItems(models)
+            if current_selection in models:
+                self.lm_model_dropdown.setCurrentText(current_selection)
+            else:
+                self.lm_model_dropdown.setCurrentIndex(0)
+                self.selected_lm_model = models[0]
+            logging.info(f"LM Studio models loaded: {models}")
+        else:
+            self.lm_model_dropdown.addItem("No loaded models")
+            logging.warning("No loaded LM Studio models")
+
+        self.lm_model_dropdown.blockSignals(False)
 
     def auto_refresh_lm_models(self):
         """Automatically refresh until it finds a model loaded in LM Studio"""
         def check():
-            try:
-                if self.lm_model_dropdown.count() > 0 and self.lm_model_dropdown.itemText(0) != "No loaded models":
-                    # === We have a model → we stop the timer ===
-                    return
-                base_url = self.lm_server_entry.text().rstrip('/')
-                if not base_url:
-                    return
-                response = requests.get(f"{base_url}/v1/models", timeout=2)
-                if response.status_code == 200:
-                    data = response.json()
-                    models = [m["id"] for m in data.get("data", [])]
-                    if models:
-                        self.lm_model_dropdown.clear()
-                        self.lm_model_dropdown.addItems(models)
-                        self.selected_lm_model = models[0]
-                        logging.info(f"Model detectat automat: {models[0]}")
-                        # === We turn off the refresh once we find a model ===
-                        return
-            except:
-                pass  # === Silent fail - keep trying ===
+            if self.lm_model_dropdown.count() > 0 and self.lm_model_dropdown.itemText(0) != "No loaded models":
+                # === We have a model → we stop the timer ===
+                return
+
+            models = self.llm.list_models(timeout=2)
+
+            if models:
+                self.lm_model_dropdown.clear()
+                self.lm_model_dropdown.addItems(models)
+                self.selected_lm_model = models[0]
+                logging.info(f"Model detectat automat: {models[0]}")
+                # === We turn off the refresh once we find a model ===
+                return
+
             # === Keeps checking every 4 seconds ===
             QTimer.singleShot(4000, check)
 
@@ -4080,7 +4222,7 @@ class AIAssistantGUI(QMainWindow):
         dialog.move(x, y)
 
         # === Version ===
-        version_label = QLabel("Version: 0.1.7 Beta", dialog)
+        version_label = QLabel("Version: 0.1.8 Beta", dialog)
         version_label.setGeometry(140, 2, 200, 20)
         version_label.setStyleSheet("color: #FFFF96; font-weight: bold; font-size: 10pt;")
 
@@ -4248,38 +4390,6 @@ class AIAssistantGUI(QMainWindow):
             logging.info("[MCP] GUI launched")
         except Exception as e:
             logging.error(f"[MCP] Failed to open GUI: {e}")
-
-    def start_mcp_server_headless(self):
-        """Start MCP server in headless (CLI) mode if not already running"""
-        import subprocess, sys
-        # === Already running? ===
-        if self.llm.mcp_server_process and self.llm.mcp_server_process.poll() is None:
-            logging.info("[MCP] Headless server already running")
-            return
-        try:
-            if not os.path.exists(MCP_SERVER_FILE):
-                logging.warning(f"[MCP] Server file not found: {MCP_SERVER_FILE}")
-                return
-            self.llm.mcp_server_process = subprocess.Popen(
-                [sys.executable, MCP_SERVER_FILE, "--no-gui"],
-                cwd=MCP_SERVER_DIR,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-            logging.info(f"[MCP] Headless server started (PID {self.llm.mcp_server_process.pid})")
-        except Exception as e:
-            logging.error(f"[MCP] Failed to start headless server: {e}")
-
-    def stop_mcp_server_headless(self):
-        """Stop the headless MCP server subprocess"""
-        if self.llm.mcp_server_process and self.llm.mcp_server_process.poll() is None:
-            self.llm.mcp_server_process.terminate()
-            try:
-                self.llm.mcp_server_process.wait(timeout=5)
-            except Exception:
-                self.llm.mcp_server_process.kill()
-            logging.info("[MCP] Headless server stopped")
-        self.llm.mcp_server_process = None
 
     def update_system_prompt_with_mcp(self, enabled):
         """Toggle MCP connection + start/stop headless server"""
@@ -4577,67 +4687,6 @@ class AIAssistantGUI(QMainWindow):
         if not silent:
             QMessageBox.information(self, "Success", "Default settings loaded successfully")
 
-    def _parse_chat_file(self, lines, include_mcp=True):
-        """
-        Parses a list of chat log lines into a list of message dicts.
-        Single source of truth — used by load_initial_chat_history() and load_chat_history().
-
-        Args:
-            lines:       readlines() output from a chat log file
-            include_mcp: if True, includes MCP Request/Response with visible=False
-                         if False, includes only User/Assistant (no 'visible' key)
-        Returns:
-            List of message dicts, sorted chronologically
-        """
-        valid_roles = ["User", "Assistant", "MCP Request", "MCP Response"] if include_mcp else ["User", "Assistant"]
-        messages = []
-        i = 0
-
-        while i < len(lines):
-            line = lines[i].strip()
-
-            if not line:
-                i += 1
-                continue
-
-            if self.is_timestamp_line(line):
-                try:
-                    parts = line.split(" ", 2)
-                    if len(parts) >= 3:
-                        timestamp = f"{parts[0]} {parts[1]}"
-                        rest = parts[2]
-
-                        if ": " in rest:
-                            role, text = rest.split(": ", 1)
-
-                            if role in valid_roles:
-                                full_text = text
-                                i += 1
-
-                                # === Accumulate continuation lines ===
-                                while i < len(lines):
-                                    next_line = lines[i]
-                                    if next_line.strip() and self.is_timestamp_line(next_line.strip()):
-                                        break
-                                    full_text += "\n" + next_line.rstrip()
-                                    i += 1
-
-                                full_text = full_text.strip()
-
-                                entry = {"timestamp": timestamp, "role": role, "text": full_text}
-                                if include_mcp:
-                                    entry["visible"] = role not in ["MCP Request", "MCP Response"]
-                                messages.append(entry)
-                                continue
-
-                except Exception as e:
-                    logging.warning(f"Skipping malformed line: {line[:50]}... Error: {e}")
-
-            i += 1
-
-        messages.sort(key=lambda x: x.get('timestamp', ''))
-        return messages
-
     def load_initial_chat_history(self):
         """Load chat history at startup — includes MCP Request/Response entries"""
         try:
@@ -4645,19 +4694,12 @@ class AIAssistantGUI(QMainWindow):
                 with open(self.current_chat_log, "r", encoding="utf-8") as f:
                     lines = f.readlines()
 
-                self.chat_history = self._parse_chat_file(lines, include_mcp=True)
+                self.chat_history = self.profiles.parse_chat_file(lines, include_mcp=True)
                 logging.info(f"Initial chat history loaded: {len(self.chat_history)} messages")
                 self.update_chat_display()
 
         except Exception as e:
             logging.error(f"Error loading initial chat history: {str(e)}")
-
-    def is_timestamp_line(self, line):
-        """Check if line begins with a valid timestamp (YYYY-MM-DD HH:MM:SS)"""
-        import re
-        # === Pattern for timestamp: 4 numbers - 2 numbers - 2 numbers space 2 numbers : 2 numbers : 2 numbers
-        pattern = r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} '
-        return bool(re.match(pattern, line))
 
     def save_prompt(self):
         file_path, _ = QFileDialog.getSaveFileName(self, "Save Prompt", PROMPTS_DIR, "Text Files (*.txt);;All Files (*)")
@@ -4694,7 +4736,7 @@ class AIAssistantGUI(QMainWindow):
             with open(file_path, "r", encoding="utf-8") as f:
                 lines = f.readlines()
 
-            self.chat_history = self._parse_chat_file(lines, include_mcp=False)
+            self.chat_history = self.profiles.parse_chat_file(lines, include_mcp=False)
             self.update_chat_display()
             logging.info(f"Chat history loaded from {file_path}: {len(self.chat_history)} messages")
             QMessageBox.information(self, "Success", f"Chat history loaded successfully\n{len(self.chat_history)} messages loaded")
