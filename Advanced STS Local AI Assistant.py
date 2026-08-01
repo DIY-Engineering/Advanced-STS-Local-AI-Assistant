@@ -4058,7 +4058,7 @@ class AIAssistantGUI(QMainWindow):
 
             # === Apply thinking setting ===
         if 'thinking_enabled' in settings:
-            self.thinking_enabled = settings.get("thinking_enabled", False)
+            self.thinking_enabled = settings['thinking_enabled'].lower() == 'true'
             self.radio_think_on.setChecked(self.thinking_enabled)
             self.radio_think_off.setChecked(not self.thinking_enabled)        
  
@@ -4444,7 +4444,7 @@ class AIAssistantGUI(QMainWindow):
             'coqui_device':             self.coqui_device,
             'wake_word':                self.wake_word,
             'wake_word_enabled':        str(self.wake_word_enabled),
-            'thinking_enabled':         self.thinking_enabled,
+            'thinking_enabled':         str(self.thinking_enabled),
             'use_mcp_server':           str(self.use_mcp_server),
             'real_talk_enabled':        str(self.real_talk_enabled),
             'rag_memory_enabled':       str(self.rag_memory_enabled),
