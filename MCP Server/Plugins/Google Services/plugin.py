@@ -29,8 +29,8 @@ except ImportError:
 # In Your Google Cloud Console Under Your Project Name Activate: "Custom Search API", "Gmail API", "People API",  "Google Calendar API", "YouTube Data API v3"
 # You have to create a custom search engine and also create an OAuth authentication file in .JSON format
 # Admin: Replace these with your actual Google API credentials
-GOOGLE_API_KEY = "0000" # To be replaced with REAL Key obtained from Google cloud console
-GOOGLE_CSE_ID = "0000" # To be replaced with CSE-ID obtained from Google cloud console
+GOOGLE_API_KEY = "0000"
+GOOGLE_CSE_ID = "0000"
 
 
 class GoogleServicesPlugin(BasePlugin):
@@ -546,9 +546,16 @@ User: "Schedule a meeting tomorrow at 2 PM"
     
     def _gmail_send(self, args):
         """Send email"""
+        self._ensure_services_loaded()
         if not self.gmail_service:
             return {"content": [{"type": "text", "text": "Gmail not authenticated"}], "isError": True}
-        
+
+        # === Same validation pattern as calendar_create — catch missing fields ===
+        # === locally with a clear message before building the MIME message ===
+        missing = [field for field in ("to", "subject", "body") if not args.get(field)]
+        if missing:
+            return {"content": [{"type": "text", "text": f"❌ Missing required argument(s): {', '.join(missing)}"}], "isError": True}
+
         try:
             to = args.get("to")
             subject = args.get("subject")
@@ -578,6 +585,7 @@ User: "Schedule a meeting tomorrow at 2 PM"
     
     def _gmail_list(self, args):
         """List emails"""
+        self._ensure_services_loaded()
         if not self.gmail_service:
             return {"content": [{"type": "text", "text": "Gmail not authenticated"}], "isError": True}
         
@@ -614,6 +622,7 @@ User: "Schedule a meeting tomorrow at 2 PM"
     
     def _calendar_list(self, args):
         """List events"""
+        self._ensure_services_loaded()
         if not self.calendar_service:
             return {"content": [{"type": "text", "text": "Calendar not authenticated"}], "isError": True}
         
@@ -646,9 +655,18 @@ User: "Schedule a meeting tomorrow at 2 PM"
     
     def _calendar_create(self, args):
         """Create event"""
+        self._ensure_services_loaded()
         if not self.calendar_service:
             return {"content": [{"type": "text", "text": "Calendar not authenticated"}], "isError": True}
-        
+
+        # === Validate ALL required fields BEFORE calling Google's API ===
+        # === Catches any missing field locally with a clear, specific message, ===
+        # === instead of sending a malformed request and getting Google's ===
+        # === confusing generic 400 error back ===
+        missing = [field for field in ("summary", "start_time", "end_time") if not args.get(field)]
+        if missing:
+            return {"content": [{"type": "text", "text": f"❌ Missing required argument(s): {', '.join(missing)}"}], "isError": True}
+
         try:
             event = {
                 'summary': args.get("summary"),
@@ -669,9 +687,14 @@ User: "Schedule a meeting tomorrow at 2 PM"
     
     def _calendar_delete(self, args):
         """Delete event"""
+        self._ensure_services_loaded()
         if not self.calendar_service:
             return {"content": [{"type": "text", "text": "Calendar not authenticated"}], "isError": True}
-        
+
+        # === Same validation pattern as calendar_create ===
+        if not args.get("event_id"):
+            return {"content": [{"type": "text", "text": "❌ Missing required argument(s): event_id"}], "isError": True}
+
         try:
             self.calendar_service.events().delete(
                 calendarId='primary', eventId=args.get("event_id")
@@ -809,6 +832,25 @@ User: "Schedule a meeting tomorrow at 2 PM"
         except Exception as e:
             return False, str(e)
     
+    def _ensure_services_loaded(self):
+        """
+        Self-healing check — if the persisted config says we're authenticated
+        but the in-memory service objects are missing (e.g. activate() failed
+        silently on this server run, or a race with config loading at startup),
+        try loading them again right now, on demand, instead of just failing.
+        Returns True if services are ready to use after this call.
+        """
+        if self.gmail_service and self.calendar_service and self.youtube_service:
+            return True  # === Already loaded, nothing to do ===
+
+        if not self.get_config("authenticated", False):
+            return False  # === Genuinely not authenticated - not our problem to fix ===
+
+        self.log("Services missing despite 'authenticated' config - retrying load...", "warning")
+        self._load_oauth_services()
+
+        return bool(self.gmail_service and self.calendar_service and self.youtube_service)
+
     def _load_oauth_services(self):
         """Load OAuth services from token — with auto-refresh if expired"""
         if not os.path.exists(self.token_file):
