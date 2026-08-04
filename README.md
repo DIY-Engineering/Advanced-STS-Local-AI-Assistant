@@ -111,7 +111,7 @@ Advanced STS Local AI Assistant\
 ├── Debug Logs\                          ← Application logs
 ├── Dependencies\                        ← Additional local dependencies
 ├── Graphics\                            ← UI assets
-├── MCP                                  ← Tool Chain Rules File
+├── MCP Skills                           ← Tool Use Skills (Separate skill file per plugin)
 ├── MCP Server\
 │   ├── Graphics\
 │   └── Plugins\                         ← MCP plugin scripts
