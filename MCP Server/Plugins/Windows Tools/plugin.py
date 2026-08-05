@@ -48,6 +48,31 @@ DEFAULT_BLACKLIST = [
     "attrib",
 ]
 
+# Critical Windows system processes - NEVER killable via kill_process, regardless
+# of Restricted/Full Access mode. This is a hardcoded, internal-only safety net,
+# NOT exposed or editable through the GUI (unlike the CLI blacklist above) -
+# closing any of these can make the system unstable, crash it, or corrupt data.
+CRITICAL_PROCESSES = {
+    "system",
+    "system idle process",
+    "registry",
+    "smss.exe",
+    "csrss.exe",
+    "wininit.exe",
+    "winlogon.exe",
+    "services.exe",
+    "lsass.exe",
+    "svchost.exe",
+    "explorer.exe",
+    "dwm.exe",
+    "spoolsv.exe",
+    "fontdrvhost.exe",
+    "sihost.exe",
+    "taskhostw.exe",
+    "python.exe",
+    "pythonw.exe",
+}
+
 # Safe media file extensions
 SAFE_MEDIA_EXTENSIONS = [
     '.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a',  # Audio
@@ -480,22 +505,24 @@ class WindowsToolsPlugin(BasePlugin):
             {"name": "open_folder", "description": "Open a standard user folder in File Explorer", "inputSchema": {"type": "object", "properties": {"folder": {"type": "string", "enum": ["documents", "downloads", "videos", "pictures", "music", "desktop"]}}, "required": ["folder"]}},
             {"name": "open_media_file", "description": "Search for a photo, video, or audio file by name across all standard user folders (Desktop, Documents, Downloads, Music, Pictures, Videos). Returns a list of matches - use windows_media_play with the chosen path to open it.", "inputSchema": {"type": "object", "properties": {"query": {"type": "string", "description": "Filename or partial filename to search for"}, "media_type": {"type": "string", "enum": ["photo", "video", "audio"]}}, "required": ["query", "media_type"]}},
             {"name": "get_file_details", "description": "Get metadata for a file (size, extension, created/modified dates) without reading its content. Read-only. Provide EITHER 'path' (e.g. from open_media_file results) OR 'folder' + 'filename' (preferred when you don't already have a full path - avoids guessing the Windows username).", "inputSchema": {"type": "object", "properties": {"path": {"type": "string", "description": "Full path to the file, e.g. from open_media_file results"}, "folder": {"type": "string", "enum": ["documents", "downloads", "videos", "pictures", "music", "desktop"], "description": "Standard folder - use with filename instead of guessing a full path"}, "filename": {"type": "string", "description": "Filename within the folder, e.g. 'readme.md'"}}}},
-            {"name": "read_text_file", "description": "Read the text content of a small file (.txt, .md, .csv, .json, .log, .py) from a standard user folder. Max 50 KB. Provide EITHER 'path' (e.g. from open_media_file results) OR 'folder' + 'filename' (preferred when you don't already have a full path - avoids guessing the Windows username).", "inputSchema": {"type": "object", "properties": {"path": {"type": "string", "description": "Full path to the text file"}, "folder": {"type": "string", "enum": ["documents", "downloads", "videos", "pictures", "music", "desktop"], "description": "Standard folder - use with filename instead of guessing a full path"}, "filename": {"type": "string", "description": "Filename within the folder, e.g. 'todo.txt'"}}}}
+            {"name": "read_text_file", "description": "Read the text content of a small file (.txt, .md, .csv, .json, .log, .py) from a standard user folder. Max 50 KB. Provide EITHER 'path' (e.g. from open_media_file results) OR 'folder' + 'filename' (preferred when you don't already have a full path - avoids guessing the Windows username).", "inputSchema": {"type": "object", "properties": {"path": {"type": "string", "description": "Full path to the text file"}, "folder": {"type": "string", "enum": ["documents", "downloads", "videos", "pictures", "music", "desktop"], "description": "Standard folder - use with filename instead of guessing a full path"}, "filename": {"type": "string", "description": "Filename within the folder, e.g. 'todo.txt'"}}}},
+            {"name": "find_process", "description": "Search running processes by name. Returns matches with pid and an 'is_main_process' flag - apps like browsers spawn many child processes sharing the same name, this flags the actual root process. Use this BEFORE kill_process.", "inputSchema": {"type": "object", "properties": {"name": {"type": "string", "description": "Process name or partial name to search for, e.g. 'brave' or 'notepad'"}}, "required": ["name"]}},
+            {"name": "kill_process", "description": "Close a running program by PID (from find_process results). Tries a graceful close first, force-closes only if it doesn't respond. A small set of critical Windows system processes can never be closed with this tool, regardless of access mode.", "inputSchema": {"type": "object", "properties": {"pid": {"type": "integer", "description": "Process ID to close, from find_process results"}}, "required": ["pid"]}}
         ]
         
         return tools
     
     def get_prompt_section(self):
         """Return detailed prompt section for Windows Tools"""
-        access_level = self.get_config("cli_access_level", "restricted")
-        
         prompt = """=== WINDOWS SYSTEM TOOLS ===
 
 - windows_cli: Execute Windows CLI commands
-  * Access level: """ + access_level.upper() + """
   * Available commands: ipconfig, tasklist, dir, ping, netstat, systeminfo, and more
   * Can manage processes, services, network, and system
-  * RESTRICTED mode has blacklist protection
+  * The current access mode (Restricted/Full Access) is NOT announced here -
+    it can change at any time from the plugin's GUI without reconnecting.
+    Just call the tool; if it's blocked, the tool result will say so clearly
+    and name the current mode. Don't assume a mode from earlier in the chat.
 
 - windows_processes: List running processes sorted by RAM or CPU usage
   * Arguments: sort_by (ram/cpu), limit (1-50, default 10)
@@ -606,6 +633,38 @@ User: "How big is that notes.txt file on my Desktop?"
 
 User: "What's written in my todo.txt on the desktop?"
 → {"id": "call_16", "tool": "read_text_file", "arguments": {"folder": "desktop", "filename": "todo.txt"}}
+
+=== TERMINATOR (closing running programs) ===
+- find_process: Search running processes by name - returns matches with pid
+  and is_main_process (true for the app's root process, false for its child/
+  helper processes - browsers spawn many processes sharing the same name)
+  * Arguments: name (process name or partial name, e.g. "brave")
+
+- kill_process: Close a program by PID (from find_process results)
+  * Arguments: pid (integer)
+  * Tries a graceful close first, force-closes only if it doesn't respond
+  * A small set of critical system processes can never be closed this way,
+    in either Restricted or Full Access mode - that toggle only affects windows_cli
+
+TERMINATOR WORKFLOW:
+  Step 1 — Call find_process with the program name.
+  Step 2 — If exactly one match has is_main_process=true → call kill_process
+           with its pid directly. Closing the main process closes its
+           children too - do NOT kill every matching pid one by one.
+  Step 3 — If there are multiple processes with is_main_process=true (e.g.
+           several separate windows/instances of the same app), list them
+           for the user and ask which one, THEN call kill_process.
+  Step 4 — If kill_process returns an error (critical process, access denied,
+           already closed), tell the user in plain text - do not retry.
+  Step 5 — After kill_process executes succesfully → respond in plain text:
+           "Closed <name> now."
+
+TERMINATOR EXAMPLE:
+User asked: "Close Brave"
+find_process results: 4 matches for "brave" - one with is_main_process=true
+(pid 4821), three with is_main_process=false (tab/renderer processes).
+Your next response MUST be:
+{"id": "call_2", "tool": "kill_process", "arguments": {"pid": 4821}}
 """
         
         return prompt
@@ -655,6 +714,10 @@ User: "What's written in my todo.txt on the desktop?"
                 result = self._get_file_details(arguments)
             elif tool_name == "read_text_file":
                 result = self._read_text_file(arguments)
+            elif tool_name == "find_process":
+                result = self._find_process(arguments)
+            elif tool_name == "kill_process":
+                result = self._kill_process(arguments)
             else:
                 result = {"ok": False, "error": f"Unknown tool: {tool_name}"}
             
@@ -1292,6 +1355,117 @@ User: "What's written in my todo.txt on the desktop?"
                 "filename": os.path.basename(path),
                 "size_bytes": size_bytes,
                 "content": content
+            }
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    # ============ TERMINATOR (find + close running programs) ============
+
+    def _find_process(self, args):
+        """
+        Search running processes by name (case-insensitive substring match).
+        Flags which matches are the likely "main" process vs auxiliary/child
+        processes - apps like browsers spawn many child processes sharing the
+        same executable name (one per tab/extension/renderer/GPU helper).
+        A process is flagged as "main" when its parent does NOT share its name -
+        i.e. it's the root of that app's process tree, not a spawned child.
+        Closing the main process normally closes its children too.
+        """
+        query = args.get("name", "").strip().lower()
+
+        if not query:
+            return {"ok": False, "error": "No process name provided"}
+
+        raw_matches = []
+        for proc in psutil.process_iter(['pid', 'name', 'ppid', 'memory_percent', 'cpu_percent']):
+            try:
+                pinfo = proc.info
+                if pinfo['name'] and query in pinfo['name'].lower():
+                    raw_matches.append(pinfo)
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                pass
+
+        if not raw_matches:
+            return {"ok": False, "error": f"No running process matching '{query}'"}
+
+        pid_to_name = {m['pid']: m['name'] for m in raw_matches}
+        results = []
+        for m in raw_matches:
+            parent_name = pid_to_name.get(m['ppid'])
+            is_main = (parent_name is None) or (parent_name.lower() != m['name'].lower())
+            results.append({
+                "pid": m['pid'],
+                "name": m['name'],
+                "ram_percent": round(m['memory_percent'], 2) if m['memory_percent'] else 0.0,
+                "cpu_percent": round(m['cpu_percent'], 2) if m['cpu_percent'] else 0.0,
+                "is_main_process": is_main
+            })
+
+        # === Main processes first, then heaviest RAM usage within each group ===
+        results.sort(key=lambda x: (not x['is_main_process'], -x['ram_percent']))
+
+        return {
+            "ok": True,
+            "query": query,
+            "count": len(results),
+            "processes": results
+        }
+
+    def _kill_process(self, args):
+        """
+        🔒 SECURE: Closes a process by PID only - never by name, never a fuzzy
+        match. Blocks CRITICAL_PROCESSES unconditionally (regardless of
+        Restricted/Full Access mode - that toggle only governs windows_cli).
+        Also refuses to kill this MCP server's own process by PID, regardless
+        of its name. Tries a graceful terminate() first, force-kills only if
+        the process doesn't respond within 3 seconds.
+        """
+        pid = args.get("pid")
+
+        if pid is None:
+            return {"ok": False, "error": "No pid provided"}
+
+        try:
+            pid = int(pid)
+        except (ValueError, TypeError):
+            return {"ok": False, "error": "pid must be an integer"}
+
+        # === Always-on protection, independent of CRITICAL_PROCESSES by name ===
+        if pid == os.getpid():
+            return {"ok": False, "error": "Refusing to close this MCP server's own process."}
+
+        try:
+            proc = psutil.Process(pid)
+            proc_name = proc.name()
+        except psutil.NoSuchProcess:
+            return {"ok": False, "error": f"No process with PID {pid} - it may have already closed."}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+        # === Always-on protection, regardless of Restricted/Full Access mode ===
+        if proc_name.lower() in CRITICAL_PROCESSES:
+            return {
+                "ok": False,
+                "error": f"'{proc_name}' (PID {pid}) is a critical system process and cannot "
+                         f"be closed - this protection applies in both Restricted and Full Access mode."
+            }
+
+        try:
+            proc.terminate()  # === Graceful close first (like clicking the window's X) ===
+            try:
+                proc.wait(timeout=3)
+            except psutil.TimeoutExpired:
+                proc.kill()   # === Didn't respond in time - force close ===
+
+            return {"ok": True, "message": f"Closed '{proc_name}' (PID {pid})."}
+
+        except psutil.NoSuchProcess:
+            return {"ok": True, "message": f"'{proc_name}' (PID {pid}) was already closed."}
+        except psutil.AccessDenied:
+            return {
+                "ok": False,
+                "error": f"Access denied closing '{proc_name}' (PID {pid}) - "
+                         f"it may require administrator privileges."
             }
         except Exception as e:
             return {"ok": False, "error": str(e)}
