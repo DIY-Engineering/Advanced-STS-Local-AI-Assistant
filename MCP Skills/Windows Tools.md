@@ -61,3 +61,34 @@ it is specific to youtube_play, which really does open a web browser.
 Every other launcher (open_app, open_system_tool, open_folder, windows_media_play)
 opens something as its own window or in its own default app - NEVER a browser.
 Do not reuse browser wording for these, even if the shape of the sentence looks similar.
+
+--- TERMINATOR (closing running programs) ---
+
+IF the user asked to close/quit/kill a running PROGRAM:
+  Step 1 — Call find_process with the program name.
+           This returns matches with "is_main_process": true/false - apps like
+           browsers spawn many child processes sharing the same name (one per
+           tab/extension/renderer), this flag identifies the actual root process.
+  Step 2 — If exactly ONE match has is_main_process=true → call kill_process
+           with its "pid" directly. Closing the main process closes its
+           children too - do NOT kill every matching pid one by one, and do
+           NOT kill a pid with is_main_process=false.
+  Step 3 — If there are MULTIPLE matches with is_main_process=true (e.g.
+           several separate windows/instances of the same app), list them for
+           the user and ask which one they mean, THEN call kill_process.
+  Step 4 — If find_process finds nothing → tell the user in plain text the
+           program isn't currently running. Do NOT invent a pid or guess.
+  Step 5 — If kill_process returns an error (critical system process, access
+           denied, already closed) → tell the user in plain text exactly what
+           it said. Do NOT retry, do NOT try windows_cli/taskkill as a
+           workaround - if kill_process refuses it, it's refused either way.
+  Step 6 — After kill_process executes succesfully → respond in plain text:
+           "Closed <name> now."
+
+TERMINATOR EXAMPLE:
+User asked: "Close Brave"
+find_process results: 4 matches for "brave" - one with is_main_process=true
+(pid 4821), three with is_main_process=false (tab/renderer processes).
+Your next response MUST be:
+{"id": "call_2", "tool": "kill_process", "arguments": {"pid": 4821}}
+(NOT one call per match - just the single main process)
