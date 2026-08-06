@@ -24,7 +24,8 @@ System Requirements :
 | Component |          Requirement        |
 |-----------|-----------------------------|
 | OS        | Windows 10 / 11 (64-Bit)    |
-| Python    | 3.12.6 X64                  |    
+| Python    | 3.12.6 X64                  | 
+| CPU       | 4 Core 8 Threads or Better  |
 | GPU       | GTX 1060 6GB or better      |
 | CUDA      | 12.8                        |
 | cuDNN     | 9.12                        |
