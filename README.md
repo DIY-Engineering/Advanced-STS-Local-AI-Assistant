@@ -30,7 +30,7 @@ System Requirements :
 | cuDNN     | 9.12                        |
 | RAM       | 16GB or more                |
 | Storage   | 20GB Free space             |
-| LLM Server| LM Studio 0.4.4             |
+| LLM Server| LM Studio                   |
 
  
 Installation :
@@ -56,7 +56,7 @@ cuDNN 9.12: ```https://developer.nvidia.com/cudnn``` (requires free NVIDIA accou
  Step 4 - Install LM Studio
 
 Download and install LM Studio: ```https://lmstudio.ai```
-I recommend starting with ```gemma-4-e2b-it-uncensored-Q4_K_M.gguf``` model, because in my case it offered the best results. To download go to LM-Studio Model Search tab, or hit ```ctrl + shift + M```. 
+I recommend starting with ```gemma-4-e2b Q4_K_M.gguf``` model, because in my case it offered the best results. To download go to LM-Studio Model Search tab, or hit ```ctrl + shift + M```. 
 Next go to ```Developer/Local Server``` tab, turn ON the local server, open ```server settings``` and turn ON ```enable CORS```, ```JIT Model loading``` and ```Only Keep Last JIT Model Loaded```.
 Next time you reboot your PC LM-Studio will auto-start in sys tray.
 
