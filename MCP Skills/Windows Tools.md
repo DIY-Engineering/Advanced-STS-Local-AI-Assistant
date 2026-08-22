@@ -1,7 +1,16 @@
 --- SYSTEM / WINDOWS TOOLS ---
 
-IF the tool results already contain the answer (datetime, volume, system info, etc.):
-  → Respond immediately in plain text. No more tool calls needed.
+IF the tool results contain the FULL answer to the user's ORIGINAL question
+(e.g. they asked "what time is it" and you got datetime; they asked for
+volume and you got volume) → respond immediately in plain text.
+
+IF you called system_datetime only as a PRELIMINARY check (because the
+General Instructions time-sensitivity rule required it, but the original
+question needs something else — weather, search results, etc.) → this is
+NOT your final answer yet. Continue to the relevant workflow below,
+using this date/time as context if needed (e.g. for the WEATHER workflow
+in Google Services skill).
+
 
 --- LAUNCHERS (apps, folders, media, files) ---
 
