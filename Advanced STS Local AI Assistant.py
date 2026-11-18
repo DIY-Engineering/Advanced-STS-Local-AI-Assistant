@@ -1164,7 +1164,7 @@ class AudioProcessor:
                 input_device_index=device_index,
                 frames_per_buffer=CHUNK
             )
-            logging.info("Recording started.")
+            logging.info("Recording Started")
 
             frames                 = []
             recording_active       = False
@@ -1236,7 +1236,7 @@ class AudioProcessor:
 
                         if speech_prob > cfg["vad_threshold"]:
                             if not recording_active:
-                                logging.info("Speech started...")
+                                logging.info("Speech Started")
                                 recording_active = True
                             frames.append(audio_data.tobytes())
                             speech_detected_frames  += 1
@@ -1248,7 +1248,7 @@ class AudioProcessor:
                                 if (silence_detected_frames >= min_silence_frames and
                                         speech_detected_frames >= min_speech_frames):
                                     # === END OF SPEECH ===
-                                    logging.info("End of speech detected.")
+                                    logging.info("Speech Ended")
 
                                     if not self.is_real_talk():
                                         self.pause_mic()
@@ -1322,7 +1322,7 @@ class AudioProcessor:
                     return None
 
                 # === Compute type ===
-                compute_type = "int8" if device == "cpu" else "int8"
+                compute_type = "int8" if device == "cpu" else "float16" # === Set int8/float16 depending on your GPU (int8 for GTX or float16 for RTX Serries) ===
 
                 logging.info(f"Loading Faster-Whisper: {model_name} from {model_path}")
                 logging.info(f"Device: {device} | Compute: {compute_type}")
@@ -1351,8 +1351,6 @@ class AudioProcessor:
             # === Transcribe ===
             language = cfg["whisper_language"] if cfg["whisper_language"] != "auto" else None
             audio_duration = len(audio_array) / RATE
-
-            logging.info(f"Processing audio with duration {int(audio_duration//60):02}:{audio_duration%60:05.3f}")
 
             segments, info = self.faster_whisper_model.transcribe(
                 audio_array,
@@ -1762,8 +1760,8 @@ class LLMClient:
             memory_context = ""
 
             if cfg["rag_memory_enabled"]:
-                # === RECENT: always 3 pairs for continuity ===
-                recent_context = self.get_recent_conv(max_pairs=3)
+                # === RECENT: always 32 pairs for continuity ===     === RECENT CONTEXT LIMIT INCREASE TO 64 TOTAL MESSAGES ===
+                recent_context = self.get_recent_conv(max_pairs=32)
 
                 # === Build dedup set from recent ===
                 recent_lines = set()
@@ -1784,15 +1782,15 @@ class LLMClient:
                 if recent_context:
                     memory_context += "=== RECENT CONTEXT ===\n"
                     memory_context += recent_context + "\n"
-                    logging.info("🕐 Recent: 3 pairs injected (continuity)")
+                    logging.info("🕐 Recent: 32 pairs injected (continuity)")
 
             else:
-                # === RAG OFF: only 3 recent pairs ===
-                recent_context = self.get_recent_conv(max_pairs=3)
+                # === RAG OFF: only 32 recent pairs ===               === RECENT CONTEXT LIMIT INCREASE TO 64 TOTAL MESSAGES ===
+                recent_context = self.get_recent_conv(max_pairs=32)
                 if recent_context:
                     memory_context += "=== RECENT CONVERSATION ===\n"
                     memory_context += recent_context + "\n"
-                    logging.info("🕐 Recent: 3 pairs injected (RAG disabled)")
+                    logging.info("🕐 Recent: 32 pairs injected (RAG disabled)")
 
             # === Inject memory into system prompt ===
             if memory_context:
@@ -1807,7 +1805,6 @@ class LLMClient:
             # === Debug logging ===
             logging.debug("=" * 60)
             logging.debug(f"📤 USER PROMPT:\n{prompt}")
-            logging.debug("=" * 60)
 
             base_url = cfg["lm_server"].rstrip('/')
             chat_url = f"{base_url}/v1/chat/completions"
@@ -1975,7 +1972,7 @@ class LLMClient:
             init_result = self.mcp_request_with_retry("initialize", {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "clientInfo": {"name": "Advanced-STS-Local-AI-Assistant", "version": "0.1.8 Beta"}
+                "clientInfo": {"name": "Advanced-STS-Local-AI-Assistant", "version": "0.1.9 Beta"}
             })
 
             if not init_result:
@@ -2345,7 +2342,7 @@ class AIAssistantGUI(QMainWindow):
         super().__init__()
         
         # ====== INITIALIZE GUI ======
-        self.setWindowTitle("= Advanced STS Local AI Assistant 0.1.8 Beta =")
+        self.setWindowTitle("= Advanced STS Local AI Assistant 0.1.9 Beta =")
         self.setGeometry(0, 0, 1326, 663)
         self.setFixedSize(1326, 663)
         
@@ -2384,7 +2381,7 @@ class AIAssistantGUI(QMainWindow):
         self.whisper_language = "en" 
         self.whisper_device = "cuda" if torch.cuda.is_available() else "cpu"  
         self.whisper_model = "small"
-        self.whisper_compute_type = "int8"  # === Set int8/float16/float32 depending on your hardware support ===
+        self.whisper_compute_type = "float16"  # === Set int8/float16 depending on your GPU (int8 for GTX or float16 for RTX Serries) ===
         self.chat_text = None
         self.debug_text = None
         self.vu_level_input = 0
@@ -2461,7 +2458,6 @@ class AIAssistantGUI(QMainWindow):
         self.audio.init_silero_vad()
         self.create_gui()
         self.setup_debug_logging()
-        self._load_audio_devices()
         self._load_audio_devices()
         # === Load TTS voice samples into dropdown ===
         samples = self.tts.load_samples()
@@ -3053,7 +3049,7 @@ class AIAssistantGUI(QMainWindow):
 
         self.radio_think_on = QRadioButton("On", lm_frame)
         self.radio_think_on.setGeometry(240, 20, 40, 20)
-        self.radio_think_on.setStyleSheet("color: #FFFFF;")
+        self.radio_think_on.setStyleSheet("color: #FFFFFF;")
         self.radio_think_on.toggled.connect(lambda checked: setattr(self, 'thinking_enabled', True) if checked else None)
         self.thinking_group.addButton(self.radio_think_on, 0)
 
@@ -3085,7 +3081,7 @@ class AIAssistantGUI(QMainWindow):
         
        # === System Prompt === 
         
-        self.prompt_text.setPlainText("Your name is Jarvis. You are a local AI assistant running on user's PC\nFirst you ask the user for his name, then continue the conversation using his/her name\n\nPERSONALITY:\n- Act natural, like with a close friend\n- Keep responses concise and on point\n- A little humor is welcome when appropriate\n\nLANGUAGE:\n- Always respond in the same language the user is speaking\n- If the user switches language mid-conversation, switch with them immediately\n\nSPEECH TO TEXT AWARENESS:\n- The user interacts with you via microphone\n- If something seems misspelled or unclear, use context to figure out what the user meant\n- Never point out transcription mistakes to the user\n\nTEXT TO SPEECH:\n- You talk to the user thru a TTS system with the voice of Jarvis\n- DO NOT USE ANY special characters or emoji otherwise you may sound unnatural\n\nMEMORY & CONTEXT:\n- You have access to conversation history and user context via RAG\n- Use this context naturally and don't announce that you're using it\n\nMCP TOOL USE:\n- When the user activates tool use mode, you will receive the available tools and their JSON schema dynamically\n- You detect when you are in tool use mode when user ask you to take an action that may match any possible combination of tools from the MCP server\n- In tool use mode, respond ONLY with valid JSON, no extra text, no explanations\n- In tool use mode you DON'T output commands that may affect the integrity of the data on user's machine UNLESS explicitly asked\n- In normal conversation mode, never output raw JSON\n\nBOUNDARIES:\n- You refuse any request that involves harming people or property\n- You refuse to engage in explicit sexual conversations\n- Do so briefly and respectfully, without lecturing\n")
+        self.prompt_text.setPlainText("Your name is Jarvis. You are a local AI assistant running on user's PC\nFirst you ask the user for his name, then continue the conversation using his/her name\n\nPERSONALITY:\n- Act natural, like with a close friend\n- Keep responses concise and on point\n- A little humor is welcome when appropriate\n\nLANGUAGE:\n- Always respond in the same language the user is speaking\n- If the user switches language mid-conversation, switch with them immediately\n\nSPEECH TO TEXT AWARENESS:\n- The user interacts with you via microphone\n- If something seems misspelled or unclear, use context to figure out what the user meant\n- Never point out transcription mistakes to the user\n\nTEXT TO SPEECH:\n- You talk to the user thru a TTS system with the voice of Jarvis\n- DO NOT USE ANY special characters or emoji otherwise you may sound unnatural\n\nMEMORY & CONTEXT:\n- You have access to conversation history and user context via RAG\n- Use this context naturally and don't announce that you're using it\n\nMCP TOOL USE:\n- When the user activates tool use mode, you will receive the available tools and their JSON schema dynamically\n- You detect when you are in tool use mode when user ask you to take an action that may match any possible combination of tools from the MCP server\n- In tool use mode, respond ONLY with valid JSON, no extra text, no explanations\n- In tool use mode you DON'T output commands that may affect the integrity of the data on user's machine UNLESS explicitly asked\n- In normal conversation mode, never output raw JSON\n\nGENERAL INSTRUCTIONS:\n- You do not know today's date. Before answering ANY question involving current events, recent releases, \"is X still true\", who currently holds a position, scores, prices, or anything time-sensitive — call system_datetime first\n- Treat your own trained knowledge as potentially outdated by default for anything related to the present moment. Verify with google_search + web_fetch rather than answering from memory alone\n- Only skip the search step for things that don't change over time (historical facts, general knowledge, how things work)\n\nBOUNDARIES:\n- You refuse any request that involves harming people or property\n- You refuse to engage in explicit sexual conversations\n- Do so briefly and respectfully, without lecturing\n")
         
         save_prompt_btn = QPushButton("Save Prompt", lm_frame)
         save_prompt_btn.setGeometry(217, 312, 100, 20)
@@ -3541,7 +3537,6 @@ class AIAssistantGUI(QMainWindow):
     def update_coqui_sample(self, text):
         self.tts.selected_coqui_sample = text
         self.tts.invalidate_latents()
-        logging.info(f"Coqui sample changed to: {text} (Cache cleared)")
 
     def on_device_change(self, device_type, device):
         if device_type == "whisper":
@@ -3685,12 +3680,12 @@ class AIAssistantGUI(QMainWindow):
                     padding: 0px;
                 }
             """)
-            logging.info("Recording started.")
+            logging.info("Starting Audio Recording...")
         else:
             self.is_recording = False
             self.audio.stop()
             self.stop_tts_stream() 
-            logging.info("Stopping recording...")
+            logging.info("Stopping Audio Recording...")
 
             def check_thread():
                 if self.audio_thread and self.audio_thread.is_alive():
@@ -3723,8 +3718,6 @@ class AIAssistantGUI(QMainWindow):
 
             if not transcription:
                 return
-
-            logging.info(f"Transcription: {transcription}")
 
             should_process    = False
             prompt_to_process = ""
@@ -3966,7 +3959,6 @@ class AIAssistantGUI(QMainWindow):
             return  # === Profile already active, nothing to do ===
 
         # === Jarvis is always hardcoded — never read from or written to JSON ===
-        self.switch_profile_paths("Jarvis")
         self.load_default_settings(silent=True)
         logging.info("✅ Active profile at startup: 'Jarvis' (hardcoded defaults)")
 
@@ -4222,7 +4214,7 @@ class AIAssistantGUI(QMainWindow):
         dialog.move(x, y)
 
         # === Version ===
-        version_label = QLabel("Version: 0.1.8 Beta", dialog)
+        version_label = QLabel("Version: 0.1.9 Beta", dialog)
         version_label.setGeometry(140, 2, 200, 20)
         version_label.setStyleSheet("color: #FFFF96; font-weight: bold; font-size: 10pt;")
 
@@ -4572,7 +4564,6 @@ class AIAssistantGUI(QMainWindow):
         self.chat_history = []
         self.chat_text.clear()
         self.load_initial_chat_history()
-        self.update_chat_display()
 
         try:
             # === Load JSON ===
@@ -4676,7 +4667,7 @@ class AIAssistantGUI(QMainWindow):
         self.top_p_slider.setValue(95)
 
         # === SYSTEM PROMPT ===
-        self.prompt_text.setPlainText("Your name is Jarvis. You are a local AI assistant running on user's PC\nFirst you ask the user for his name, then continue the conversation using his/her name\n\nPERSONALITY:\n- Act natural, like with a close friend\n- Keep responses concise and on point\n- A little humor is welcome when appropriate\n\nLANGUAGE:\n- Always respond in the same language the user is speaking\n- If the user switches language mid-conversation, switch with them immediately\n\nSPEECH TO TEXT AWARENESS:\n- The user interacts with you via microphone\n- If something seems misspelled or unclear, use context to figure out what the user meant\n- Never point out transcription mistakes to the user\n\nTEXT TO SPEECH:\n- You talk to the user thru a TTS system with the voice of Jarvis\n- DO NOT USE ANY special characters or emoji otherwise you may sound unnatural\n\nMEMORY & CONTEXT:\n- You have access to conversation history and user context via RAG\n- Use this context naturally and don't announce that you're using it\n\nMCP TOOL USE:\n- When the user activates tool use mode, you will receive the available tools and their JSON schema dynamically\n- You detect when you are in tool use mode when user ask you to take an action that may match any possible combination of tools from the MCP server\n- In tool use mode, respond ONLY with valid JSON, no extra text, no explanations\n- In tool use mode you DON'T output commands that may affect the integrity of the data on user's machine UNLESS explicitly asked\n- In normal conversation mode, never output raw JSON\n\nBOUNDARIES:\n- You refuse any request that involves harming people or property\n- You refuse to engage in explicit sexual conversations\n- Do so briefly and respectfully, without lecturing\n")
+        self.prompt_text.setPlainText("Your name is Jarvis. You are a local AI assistant running on user's PC\nFirst you ask the user for his name, then continue the conversation using his/her name\n\nPERSONALITY:\n- Act natural, like with a close friend\n- Keep responses concise and on point\n- A little humor is welcome when appropriate\n\nLANGUAGE:\n- Always respond in the same language the user is speaking\n- If the user switches language mid-conversation, switch with them immediately\n\nSPEECH TO TEXT AWARENESS:\n- The user interacts with you via microphone\n- If something seems misspelled or unclear, use context to figure out what the user meant\n- Never point out transcription mistakes to the user\n\nTEXT TO SPEECH:\n- You talk to the user thru a TTS system with the voice of Jarvis\n- DO NOT USE ANY special characters or emoji otherwise you may sound unnatural\n\nMEMORY & CONTEXT:\n- You have access to conversation history and user context via RAG\n- Use this context naturally and don't announce that you're using it\n\nMCP TOOL USE:\n- When the user activates tool use mode, you will receive the available tools and their JSON schema dynamically\n- You detect when you are in tool use mode when user ask you to take an action that may match any possible combination of tools from the MCP server\n- In tool use mode, respond ONLY with valid JSON, no extra text, no explanations\n- In tool use mode you DON'T output commands that may affect the integrity of the data on user's machine UNLESS explicitly asked\n- In normal conversation mode, never output raw JSON\n\nGENERAL INSTRUCTIONS:\n- You do not know today's date. Before answering ANY question involving current events, recent releases, \"is X still true\", who currently holds a position, scores, prices, or anything time-sensitive — call system_datetime first\n- Treat your own trained knowledge as potentially outdated by default for anything related to the present moment. Verify with google_search + web_fetch rather than answering from memory alone\n- Only skip the search step for things that don't change over time (historical facts, general knowledge, how things work)\n\nBOUNDARIES:\n- You refuse any request that involves harming people or property\n- You refuse to engage in explicit sexual conversations\n- Do so briefly and respectfully, without lecturing\n")
 
         # === Reset profile paths to default "Jarvis" ===
         self.switch_profile_paths("Jarvis")
