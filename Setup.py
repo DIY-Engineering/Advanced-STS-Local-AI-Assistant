@@ -179,11 +179,8 @@ PIP_PACKAGES = [
     "pydub==0.25.1",
     "soundfile==0.13.1",
     "audioread==3.1.0",
-    # Google APIs
-    "google-auth==2.48.0",
-    "google-auth-httplib2==0.3.0",
-    "google-auth-oauthlib==1.2.4",
-    "google-api-python-client==2.188.0",
+    # Tavily APIs
+    "tavily==1.1.0",
     # Faster Whisper
     "faster-whisper==1.2.1",
     "ctranslate2==4.6.3",
