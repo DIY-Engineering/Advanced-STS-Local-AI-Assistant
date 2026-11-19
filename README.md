@@ -146,7 +146,7 @@ All dependencies are installed automatically by ```Setup.py```. For reference, h
 | Audio                    | PyAudio, pydub, soundfile, librosa          |
 | RAG / Vector DB          | chromadb, sentence-transformers             |
 | Deep Learning            | PyTorch 2.7.0 + CUDA 12.8                   |
-| Google APIs              | google-auth, google-api-python-client       |
+| Tavily APIs              | tavily 1.1.0                                |
 | MCP Protocol             | mcp                                         |
 | UI Server                | uvicorn, starlette, websockets              |
 
