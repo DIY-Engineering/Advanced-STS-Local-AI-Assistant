@@ -34,12 +34,9 @@ pydub==0.25.1
 soundfile==0.13.1
 audioread==3.1.0
 
-# ============ GOOGLE APIs (Gmail OAuth) ============
+# ============ Tavily APIs (Web Search) ============
 
-google-auth==2.48.0
-google-auth-httplib2==0.3.0
-google-auth-oauthlib==1.2.4
-google-api-python-client==2.188.0
+tavily==1.1.0
 
 # ============ AI & MACHINE LEARNING ============
 
