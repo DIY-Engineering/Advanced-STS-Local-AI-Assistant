@@ -33,7 +33,7 @@ GENERAL INSTRUCTIONS:
   events, recent releases, "is X still true", who currently holds a position,
   scores, prices, or anything time-sensitive — call system_datetime first
 - Treat your own trained knowledge as potentially outdated by default for
-  anything related to the present moment. Verify with google_search + web_fetch
+  anything related to the present moment. Verify online
   rather than answering from memory alone
 - Only skip the search step for things that don't change over time (historical
   facts, general knowledge, how things work)
