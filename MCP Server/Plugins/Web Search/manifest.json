@@ -1,0 +1,8 @@
+{
+  "name": "web_search",
+  "display_name": "Web Search",
+  "version": "0.1.0 Beta",
+  "description": "Web search via Tavily, page fetch, YouTube search and browser URL opening",
+  "author": "Nechifor Marian",
+  "enabled": true
+}
