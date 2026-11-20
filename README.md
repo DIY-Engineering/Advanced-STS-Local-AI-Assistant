@@ -25,12 +25,12 @@ System Requirements :
 |-----------|-----------------------------|
 | OS        | Windows 10 / 11 (64-Bit)    |
 | Python    | 3.12.6 X64                  | 
-| CPU       | 4 Core 8 Threads or Better  |
-| GPU       | GTX 1060 6GB or better      |
+| CPU       | 6 Core 12 Threads or Better |
+| GPU       | RTX 3060 12GB or better     |
 | CUDA      | 12.8                        |
 | cuDNN     | 9.12                        |
-| RAM       | 16GB or more                |
-| Storage   | 20GB Free space             |
+| RAM       | 32GB or more                |
+| Storage   | 25GB Free space             |
 | LLM Server| LM Studio                   |
 
  
