@@ -143,7 +143,7 @@ class WebSearchPlugin(BasePlugin):
 
         # === Status ===
         self.status_label = QLabel("", frame)
-        self.status_label.setGeometry(270, 30, 100, 20)
+        self.status_label.setGeometry(263, 30, 100, 20)
         if self.api_key:
             self._set_status("Key Saved", "#00FF00")
         else:
