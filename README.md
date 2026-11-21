@@ -166,6 +166,12 @@ Real Talk immediatly stops the TTS if it detects ANY voice and restarts the proc
 
 Troubleshooting :
 
+```Setup fails or runs with errors``` 
+→ Disable "Smart APP Control" in Windows Defender
+
+```AI Assistant sript fails to run```
+→ Disable "Smart APP Control" in Windows Defender
+
 ```ModuleNotFoundError``` on launch
 → Make sure you ran ```Setup.py``` and it completed without errors. Check ```Debug Logs\Debug Log.txt``` for details.
 
