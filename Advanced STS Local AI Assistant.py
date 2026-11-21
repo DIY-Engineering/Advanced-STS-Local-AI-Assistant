@@ -59,6 +59,7 @@ def create_folder_structure():
         "Dependencies",
         "Graphics",
         "MCP Server",
+        "MCP Skills",
         os.path.join("MCP Server", "Graphics"),
         os.path.join("MCP Server", "Plugins"),
         "Profiles",
