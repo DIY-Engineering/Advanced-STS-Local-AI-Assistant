@@ -2717,7 +2717,7 @@ class AIAssistantGUI(QMainWindow):
         radio_large = QRadioButton("Large", stt_frame)
         radio_large.setGeometry(240, 60, 80, 20)
         radio_large.setStyleSheet("color: #FFFFFF;")
-        radio_large.toggled.connect(lambda checked: setattr(self, 'whisper_model', 'large') if checked else None)
+        radio_large.toggled.connect(lambda checked: setattr(self, 'whisper_model', 'large-v3') if checked else None)
         self.whisper_model_group.addButton(radio_large, 4)
         
         # ====== SILERO VAD SETTINGS ======
