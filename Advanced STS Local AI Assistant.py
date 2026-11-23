@@ -110,6 +110,10 @@ logging.basicConfig(
     ]
 )
 
+# === Third-party libraries log through the same root logger — quiet the chatty ones ===
+for noisy_logger in ("sentence_transformers", "chromadb", "urllib3"):
+    logging.getLogger(noisy_logger).setLevel(logging.WARNING)
+
 # ====== GLOBAL CONFIG ======
 PROMPTS_DIR        = os.path.join(BASE_DIR, "System Prompt")
 HISTORY_DIR        = os.path.join(BASE_DIR, "Chat History")
@@ -130,6 +134,23 @@ VAD_THRESHOLD = 0.2
 VAD_WINDOW_SIZE = 512
 VAD_MIN_SPEECH_DURATION = 1.0
 VAD_MIN_SILENCE_DURATION = 1.5
+
+# ====== LLM CONTEXT CONFIG (recent conversation + RAG memory injected on every LLM query) ======
+RECENT_CONTEXT_PAIRS  = 32     # === Recent User->Assistant pairs injected into the system prompt (32 pairs = 64 messages) ===
+RECENT_MSG_MAX_CHARS  = 1000   # === Max characters kept per recent message (User or Assistant) ===
+RAG_TOP_K             = 4      # === RAG message budget: RAG_TOP_K // 2 semantic pairs are injected ===
+RAG_DOC_MAX_CHARS     = 1000   # === Max characters kept per RAG message ===
+RAG_CONTEXT_MAX_CHARS = 4500   # === Hard cap for the whole RAG block (2 pairs x 2 messages x ~1000 chars + labels) ===
+# === Characters kept when cleaning messages for the LLM context — everything else (emoji, symbols) is stripped ===
+CONTEXT_STRIP_RE      = re.compile(r"[^\w\s,.!?\-'\":/\\(){}\[\]]", re.UNICODE)
+
+def count_context_messages(context):
+    """Count the real pairs/messages in a context string made of 'User: ...' / 'Assistant: ...' lines."""
+    if not context:
+        return 0, 0
+    lines = [line for line in context.split("\n") if line.strip()]
+    pairs = sum(1 for line in lines if line.startswith("User: "))
+    return pairs, len(lines)
 
 ModelManager.models_dir = COQUI_MODELS_DIR
 logging.info(f"Folder structure initialized — {_created} new folder(s) created")
@@ -455,19 +476,18 @@ class ProfileManager:
         pattern = r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} '
         return bool(re.match(pattern, line))
 
-    def parse_chat_file(self, lines, include_mcp=True):
+    def parse_chat_file(self, lines):
         """
         Parses a list of chat log lines into a list of message dicts.
         Single source of truth for chat log parsing — pure function, no GUI dependency.
+        Only User/Assistant entries are returned — any other role (e.g. old MCP entries in existing logs) is skipped.
 
         Args:
-            lines:       readlines() output from a chat log file
-            include_mcp: if True, includes MCP Request/Response with visible=False
-                         if False, includes only User/Assistant (no 'visible' key)
+            lines: readlines() output from a chat log file
         Returns:
             List of message dicts, sorted chronologically
         """
-        valid_roles = ["User", "Assistant", "MCP Request", "MCP Response"] if include_mcp else ["User", "Assistant"]
+        valid_roles = ["User", "Assistant"]
         messages = []
         i = 0
 
@@ -502,10 +522,7 @@ class ProfileManager:
 
                                 full_text = full_text.strip()
 
-                                entry = {"timestamp": timestamp, "role": role, "text": full_text}
-                                if include_mcp:
-                                    entry["visible"] = role not in ["MCP Request", "MCP Response"]
-                                messages.append(entry)
+                                messages.append({"timestamp": timestamp, "role": role, "text": full_text})
                                 continue
 
                 except Exception as e:
@@ -555,7 +572,7 @@ class RAGManager:
         self.init_rag_system()
         self.rag_thread = threading.Thread(target=self.rag_worker, daemon=True)
         self.rag_thread.start()
-        logging.info("RAG worker thread started.")
+        logging.info("✅ RAG Worker Thread Started.")
 
     def stop(self):
         """Graceful shutdown — signal worker thread to exit."""
@@ -585,7 +602,7 @@ class RAGManager:
                 metadata={"hnsw:space": "cosine"}
             )
             self._cleanup_orphaned_rag_folders(new_rag_dir)
-            logging.info(f"RAG reinitialized → '{new_rag_dir}' | Docs: {self.rag_collection.count()}")
+            logging.info(f"✅ RAG Reinitialized → '{new_rag_dir}' | Docs: {self.rag_collection.count()}")
 
         except Exception as e:
             logging.error(f"RAG reinit error: {str(e)}")
@@ -603,12 +620,11 @@ class RAGManager:
         """Return True if embedder + collection are both initialized."""
         return bool(self.rag_embedder and self.rag_collection is not None)
 
-    def rebuild(self, chat_history=None, include_mcp=False):
+    def rebuild(self, chat_history=None):
         """
-        Rebuild RAG database from chat history.
+        Rebuild RAG database from chat history (User/Assistant messages only).
         Args:
             chat_history : list | None — defaults to self.get_chat_history() if not provided
-            include_mcp  : bool — if True, also indexes "MCP Request"/"MCP Response" entries
         Returns: int — number of messages queued for indexing
         """
         try:
@@ -617,8 +633,6 @@ class RAGManager:
                 return 0
 
             allowed_roles = {"User", "Assistant"}
-            if include_mcp:
-                allowed_roles |= {"MCP Request", "MCP Response"}
 
             # === Clear existing documents ===
             self.rag_collection = self.rag_client.get_or_create_collection(
@@ -629,7 +643,7 @@ class RAGManager:
             existing_ids = existing.get('ids', [])
             if existing_ids:
                 self.rag_collection.delete(ids=existing_ids)
-                logging.info(f"Cleared {len(existing_ids)} existing documents")
+                logging.info(f"✅ Cleared {len(existing_ids)} existing documents")
 
             history = chat_history if chat_history is not None else self.get_chat_history()
             count = 0
@@ -641,7 +655,7 @@ class RAGManager:
                     self.index_message(role, text, timestamp)
                     count += 1
 
-            logging.info(f"RAG rebuild queued: {count} messages")
+            logging.info(f"✅ RAG Rebuild Queued: {count} Messages")
             return count
 
         except Exception as e:
@@ -658,7 +672,7 @@ class RAGManager:
         if self.rag_thread and self.rag_thread.is_alive():
             self.rag_queue.put(None)
             self.rag_thread.join(timeout=2)
-            logging.info("RAG worker thread stopped.")
+            logging.info("✅ RAG Worker Thread Stopped.")
 
         # === client.reset() — explicitly releases ALL file handles (mmap + SQLite WAL) ===
         # === This is the only reliable way to unlock chroma.sqlite3 and HNSW .bin files on Windows ===
@@ -680,7 +694,7 @@ class RAGManager:
         self.rag_event.clear()
         self.rag_thread = threading.Thread(target=self.rag_worker, daemon=True)
         self.rag_thread.start()
-        logging.info("RAG worker thread restarted.")
+        logging.info("✅ RAG worker thread restarted.")
 
     def clear(self):
         """
@@ -697,7 +711,7 @@ class RAGManager:
             if self.rag_thread and self.rag_thread.is_alive():
                 self.rag_queue.put(None)
                 self.rag_thread.join(timeout=2)
-                logging.info("RAG worker thread stopped.")
+                logging.info("✅ RAG Worker Thread Stopped.")
         except Exception as e:
             logging.error(f"Error stopping RAG thread: {str(e)}")
 
@@ -709,14 +723,14 @@ class RAGManager:
         try:
             if self.rag_client is not None:
                 self.rag_client.delete_collection("chat_memory")
-                logging.info("RAG collection deleted.")
+                logging.info("🗑️ RAG Collection Deleted.")
 
                 self.rag_collection = self.rag_client.create_collection(
                     name="chat_memory",
                     metadata={"hnsw:space": "cosine"}
                 )
                 self._cleanup_orphaned_rag_folders(current_rag_dir)
-                logging.info("Fresh RAG collection created.")
+                logging.info("✅ Fresh RAG Collection Created.")
 
                 # === VACUUM directly on chroma.sqlite3 to reclaim disk space ===
                 # === SQLite marks deleted pages as free but keeps file size without VACUUM ===
@@ -728,13 +742,13 @@ class RAGManager:
                         conn.execute("VACUUM")
                         conn.close()
                         size_kb = os.path.getsize(sqlite_path) / 1024
-                        logging.info(f"SQLite VACUUM complete — file size: {size_kb:.1f} KB")
+                        logging.info(f"✅ SQLite VACUUM Complete — File Size: {size_kb:.1f} KB")
                     except Exception as ve:
                         logging.warning(f"VACUUM failed (non-critical): {str(ve)}")
             else:
                 # === Client not available — full reinit as fallback ===
                 self.switch_profile(current_rag_dir)
-                logging.info("RAG reinitialized (fallback).")
+                logging.info("🔄️ RAG Reinitialized (fallback).")
         except Exception as e:
             logging.error(f"Error resetting RAG collection: {str(e)}")
             self.switch_profile(current_rag_dir)
@@ -744,7 +758,7 @@ class RAGManager:
             self.rag_event.clear()
             self.rag_thread = threading.Thread(target=self.rag_worker, daemon=True)
             self.rag_thread.start()
-            logging.info("RAG worker thread restarted.")
+            logging.info("✅ RAG Worker Thread Restarted.")
         except Exception as e:
             logging.error(f"Error restarting RAG thread: {str(e)}")
 
@@ -781,7 +795,7 @@ class RAGManager:
                         ids=[doc_id]
                     )
 
-                    logging.info(f"RAG: Indexed {role} message (ID: {doc_id})")
+                    logging.info(f"📚 RAG: Indexed {role} Message (ID: {doc_id})")
 
                 except queue.Empty:
                     continue
@@ -795,7 +809,7 @@ class RAGManager:
     # === QUERY ===
     # =============
 
-    def query(self, query_text, top_k=6, recent_lines=None):
+    def query(self, query_text, top_k=RAG_TOP_K, recent_lines=None):
         """
         Semantic memory query — returns relevant past messages.
         Args:
@@ -829,18 +843,18 @@ class RAGManager:
                 role      = meta.get('role', 'Unknown')
                 timestamp = meta.get('timestamp', '')
 
+                # === Guard for legacy entries still stored in old RAG databases (purged by Rebuild RAG) ===
                 if role not in ('User', 'Assistant'):
                     continue
 
-                import re
-                doc_clean = re.sub(r"[^\w\s,.!?'-]", '', doc, flags=re.UNICODE)
+                doc_clean = CONTEXT_STRIP_RE.sub('', doc)
                 doc_clean = ' '.join(doc_clean.split())
 
                 if not doc_clean.strip() or len(doc_clean.strip()) < 5:
                     continue
 
-                if len(doc_clean) > 150:
-                    doc_clean = doc_clean[:150] + "..."
+                if len(doc_clean) > RAG_DOC_MAX_CHARS:
+                    doc_clean = doc_clean[:RAG_DOC_MAX_CHARS] + "..."
 
                 doc_normalized = doc_clean.lower()[:80]
                 if doc_normalized in recent_lines:
@@ -874,21 +888,22 @@ class RAGManager:
 
             context = "\n".join(context_parts)
 
-            max_chars = 2000
+            max_chars = RAG_CONTEXT_MAX_CHARS
             if len(context) > max_chars:
                 context = context[:max_chars]
                 last_newline = context.rfind('\n')
                 if last_newline > 0:
                     context = context[:last_newline]
 
-            logging.info(f"RAG: {len(pairs)} pairs (~{len(context)//4} tokens)")
+            built_pairs, built_msgs = count_context_messages(context)
+            logging.info(f"📚 RAG: {built_pairs}/{top_k // 2} Pairs Built ({built_msgs} Messages, {len(context)} Chars)")
             return context
 
         except Exception as e:
             logging.error(f"RAG Query Error: {str(e)}")
             return ""
 
-    def get_recent_conversation(self, max_pairs=3):
+    def get_recent_conversation(self, max_pairs=RECENT_CONTEXT_PAIRS):
         """
         Extract last N User→Assistant pairs from chat history.
         Returns formatted string in chronological order.
@@ -898,7 +913,6 @@ class RAGManager:
             if not chat_history:
                 return ""
 
-            import re
             pairs = []
 
             i = len(chat_history) - 1
@@ -908,20 +922,20 @@ class RAGManager:
                 text  = entry.get('text', '').strip()
 
                 if role == 'Assistant' and text and len(text) >= 5:
-                    assistant_text = re.sub(r"[^\w\s,.!?\-\'\"\{\}\[\]:/\\]", '', text, flags=re.UNICODE)
+                    assistant_text = CONTEXT_STRIP_RE.sub('', text)
                     assistant_text = ' '.join(assistant_text.split())
-                    if len(assistant_text) > 150:
-                        assistant_text = assistant_text[:150] + "..."
+                    if len(assistant_text) > RECENT_MSG_MAX_CHARS:
+                        assistant_text = assistant_text[:RECENT_MSG_MAX_CHARS] + "..."
 
                     j = i - 1
                     while j >= 0:
                         prev = chat_history[j]
                         if prev.get('role') == 'User':
                             user_text = prev.get('text', '').strip()
-                            user_text = re.sub(r"[^\w\s,.!?'-]", '', user_text, flags=re.UNICODE)
+                            user_text = CONTEXT_STRIP_RE.sub('', user_text)
                             user_text = ' '.join(user_text.split())
-                            if len(user_text) > 150:
-                                user_text = user_text[:150] + "..."
+                            if len(user_text) > RECENT_MSG_MAX_CHARS:
+                                user_text = user_text[:RECENT_MSG_MAX_CHARS] + "..."
                             if len(user_text) >= 5:
                                 pairs.append((user_text, assistant_text))
                             i = j - 1
@@ -940,7 +954,7 @@ class RAGManager:
                 context_parts.append(f"Assistant: {assistant_text}")
 
             result = "\n".join(context_parts)
-            logging.info(f"Recent: {len(pairs)} pairs (~{len(result)//4} tokens)")
+            logging.info(f"🕐 Recent: {len(pairs)}/{max_pairs} Pairs Built ({len(pairs) * 2} Messages, {len(result)} Chars)")
             return result
 
         except Exception as e:
@@ -955,9 +969,9 @@ class RAGManager:
         """Load MiniLM embedder and initialize ChromaDB."""
         try:
             cfg = self.get_config()
-            logging.info("Loading RAG Embedder Model (MiniLM-L6-v2)...")
+            logging.info("⏳ Loading RAG Embedder Model (MiniLM-L6-v2)...")
             self.rag_embedder = SentenceTransformer(RAG_EMBEDDER_DIR)
-            logging.info("RAG Embedder loaded successfully.")
+            logging.info("✅ RAG Embedder Loaded Successfully.")
 
             self.rag_client = chromadb.PersistentClient(
                 path=cfg["current_rag_dir"],
@@ -968,7 +982,7 @@ class RAGManager:
                 metadata={"hnsw:space": "cosine"}
             )
             self._cleanup_orphaned_rag_folders(cfg["current_rag_dir"])
-            logging.info(f"RAG Database initialized. Documents: {self.rag_collection.count()}")
+            logging.info(f"✅ RAG Database Initialized. Documents: {self.rag_collection.count()}")
 
         except Exception as e:
             logging.error(f"RAG Initialization Error: {str(e)}")
@@ -986,7 +1000,7 @@ class RAGManager:
                 if os.path.isdir(item_path) and item != active_uuid:
                     try:
                         shutil.rmtree(item_path)
-                        logging.info(f"Removed orphaned RAG folder: {item}")
+                        logging.info(f"🗑️ Removed Orphaned RAG Folder: {item}")
                     except Exception as e:
                         logging.warning(f"Could not remove orphaned folder '{item}': {e}")
         except Exception as e:
@@ -1069,14 +1083,14 @@ class AudioProcessor:
     def pause_mic(self):
         """Pause microphone — called after speech detected (Standard Mode)."""
         self.recording_paused = True
-        logging.info("Microphone PAUSED.")
+        logging.info("🎤 Microphone PAUSED.")
         self.vu_input_signal.emit(0)
 
     def resume_mic(self):
         """Resume microphone — called after TTS completes."""
         self.recording_paused = False
         self.resume_event.set()
-        logging.info("Microphone RESUMED.")
+        logging.info("🎤 Microphone RESUMED.")
 
     def load_devices(self):
         """Return (mics, outputs) — lists of available audio devices."""
@@ -1084,19 +1098,19 @@ class AudioProcessor:
         outputs = []
         try:
             p = pyaudio.PyAudio()
-            logging.info("Loading audio input devices")
+            logging.info("⏳ Loading Audio Input Devices...")
             for i in range(p.get_device_count()):
                 dev = p.get_device_info_by_index(i)
                 if dev.get('maxInputChannels', 0) > 0:
                     mics.append(f"{i}: {dev['name']}")
-            logging.info(f"Microphones loaded: {mics}")
+            logging.info(f"✅ Audio Input Drvices Loaded: {mics}")
 
-            logging.info("Loading audio output devices")
+            logging.info("⏳ Loading Audio Output Devices...")
             for i in range(p.get_device_count()):
                 dev = p.get_device_info_by_index(i)
                 if dev.get('maxOutputChannels', 0) > 0:
                     outputs.append(f"{i}: {dev['name']}")
-            logging.info(f"Output devices loaded: {outputs}")
+            logging.info(f"✅ Audio Output Devices Loaded: {outputs}")
             p.terminate()
         except Exception as e:
             logging.error(f"Error loading audio devices: {str(e)}")
@@ -1165,7 +1179,7 @@ class AudioProcessor:
                 input_device_index=device_index,
                 frames_per_buffer=CHUNK
             )
-            logging.info("Recording Started")
+            logging.info("✅ Recording Started")
 
             frames                 = []
             recording_active       = False
@@ -1296,7 +1310,7 @@ class AudioProcessor:
 
     def transcribe_audio(self, audio_array):
         """Transcribe audio using Faster-Whisper (local models only)."""
-        logging.info("Transcribing audio with Faster-Whisper")
+        logging.info("📝 Transcribing Audio With Faster-Whisper")
         cfg = self.get_config()
 
         try:
@@ -1323,9 +1337,9 @@ class AudioProcessor:
                     return None
 
                 # === Compute type ===
-                compute_type = "int8" if device == "cpu" else "float16" # === Set int8/float16 depending on your GPU (int8 for GTX or float16 for RTX Serries) ===
+                compute_type = "int8" if device == "cpu" else "int8" # === Set int8/float16 depending on your GPU (int8 for GTX or float16 for RTX Serries) ===
 
-                logging.info(f"Loading Faster-Whisper: {model_name} from {model_path}")
+                logging.info(f"⏳ Loading Faster-Whisper: {model_name} from {model_path}")
                 logging.info(f"Device: {device} | Compute: {compute_type}")
 
                 try:
@@ -1339,7 +1353,7 @@ class AudioProcessor:
                     self.current_whisper_model  = model_name
                     self.current_whisper_device = device
                     self.whisper_compute_type   = compute_type
-                    logging.info("Faster-Whisper loaded successfully!")
+                    logging.info("✅ Faster-Whisper Loaded Successfully!")
 
                 except Exception as load_error:
                     logging.error(f"Failed to load Whisper model: {str(load_error)}")
@@ -1367,7 +1381,7 @@ class AudioProcessor:
                 logging.info(f"Detected language: {info.language} ({info.language_probability:.0%})")
 
             if transcription:
-                logging.info(f"Transcription: {transcription}")
+                logging.info(f"📝 Transcription: {transcription}")
 
             return transcription if transcription else None
 
@@ -1438,7 +1452,7 @@ class TTSEngine:
         """Start the TTS worker thread."""
         self.tts_thread = threading.Thread(target=self.tts_worker, daemon=True)
         self.tts_thread.start()
-        logging.info("TTS worker thread started.")
+        logging.info("✅ TTS Worker Thread Started.")
 
     def stop(self):
         """Graceful shutdown — signal worker thread to exit."""
@@ -1475,7 +1489,7 @@ class TTSEngine:
 
         self.tts_active = False
         self.vu_output_signal.emit(0)
-        logging.info("TTS stop signal sent.")
+        logging.info("✅ TTS Stop Signal Sent.")
 
     def invalidate_latents(self):
         """Force recalculation of speaker latents on next synthesis (call on voice sample change)."""
@@ -1488,7 +1502,7 @@ class TTSEngine:
                 raise FileNotFoundError(f"Coqui samples directory not found: {COQUI_SAMPLES_DIR}")
             samples      = glob.glob(os.path.join(COQUI_SAMPLES_DIR, "*.wav"))
             sample_names = [os.path.basename(s) for s in samples]
-            logging.info(f"Coqui samples loaded: {sample_names}")
+            logging.info(f"✅ TTS Samples Loaded: {sample_names}")
             return sample_names
         except Exception as e:
             logging.error(f"Coqui load_samples error: {str(e)}")
@@ -1528,7 +1542,7 @@ class TTSEngine:
                 frames_per_buffer=PLAYBACK_CHUNK
             )
             self.current_tts_stream = stream
-            logging.info("TTS Stream initialized.")
+            logging.info("✅ TTS Stream Initialized.")
 
             while not self.tts_event.is_set():
                 completion_event = None
@@ -1545,7 +1559,7 @@ class TTSEngine:
 
                     self.tts_active = True
                     self.stop_tts_flag.clear()
-                    logging.info(f"Processing TTS: {text[:70]}...")
+                    logging.info(f"⏳ Processing TTS: {text[:70]}...")
 
                     if not stream.is_active():
                         stream.start_stream()
@@ -1655,7 +1669,7 @@ class TTSEngine:
                     # === completion_event.set() called AFTER full hardware drain ===
                     if completion_event is not None:
                         completion_event.set()
-                        logging.info("TTS completion signaled — audio fully played.")
+                        logging.info("✅ TTS Completion Signaled — Audio Fully Played.")
 
         except Exception as e:
             logging.error(f"Critical TTS Worker Error: {str(e)}")
@@ -1684,7 +1698,7 @@ class TTSEngine:
             self.coqui_model = Xtts.init_from_config(config)
             self.coqui_model.load_checkpoint(config, checkpoint_dir=COQUI_MODELS_DIR, eval=True)
             self.coqui_model.to(self.coqui_device)
-            logging.info("XTTS Model Loaded.")
+            logging.info("🐸 XTTS Model Loaded.")
 
     def _ensure_latents(self):
         """Calculate speaker latents if not cached."""
@@ -1692,7 +1706,7 @@ class TTSEngine:
             speaker_wav                        = os.path.join(COQUI_SAMPLES_DIR, self.selected_coqui_sample)
             gpt_cond_latent, speaker_embedding = self.coqui_model.get_conditioning_latents(audio_path=[speaker_wav])
             self.speaker_latents               = (gpt_cond_latent, speaker_embedding)
-            logging.info(f"XTTS Latents Recalculated for: {self.selected_coqui_sample}")
+            logging.info(f"🐸 XTTS Latents Recalculated for: {self.selected_coqui_sample}")
 
 
 class LLMClient:
@@ -1704,7 +1718,6 @@ class LLMClient:
 
     def __init__(self,
                  show_warning_signal,
-                 append_log_callback,
                  get_system_prompt,
                  get_recent_conv,
                  query_rag_callback,
@@ -1713,7 +1726,6 @@ class LLMClient:
         """
         Args:
             show_warning_signal        : pyqtSignal(str, str) — thread-safe warning dialog
-            append_log_callback        : callable(role, text, visible=True) — chat history log
             get_system_prompt          : callable() -> str — current system prompt text
             get_recent_conv            : callable(max_pairs) -> str — recent conversation context
             query_rag_callback         : callable(query, top_k, recent_lines) -> str — RAG query
@@ -1722,7 +1734,6 @@ class LLMClient:
         """
         # === Callbacks & signals ===
         self.show_warning          = show_warning_signal
-        self.append_log            = append_log_callback
         self.get_system_prompt     = get_system_prompt
         self.get_recent_conv       = get_recent_conv
         self.query_rag             = query_rag_callback
@@ -1739,12 +1750,21 @@ class LLMClient:
     # === LM STUDIO QUERIES ===
     # =========================
 
+    def _log_usage(self, data, elapsed, label="Query"):
+        """Log the real token usage reported by LM Studio (OpenAI-compatible 'usage' field)."""
+        usage = data.get("usage") or {}
+        logging.info(
+            f"📊 {label} Usage: Prompt={usage.get('prompt_tokens', '?')} Tokens | "
+            f"Completion={usage.get('completion_tokens', '?')} Tokens | "
+            f"Total={usage.get('total_tokens', '?')} | {elapsed:.2f}s"
+        )
+
     def query(self, prompt):
         """
         Main LLM query — injects system prompt, RAG memory and recent context.
         Used for all standard user interactions.
         """
-        logging.info("Thinking: Processing prompt with LM Studio")
+        logging.info("🧠 Thinking: Processing prompt with LM Studio")
 
         cfg = self.get_config()
 
@@ -1761,8 +1781,8 @@ class LLMClient:
             memory_context = ""
 
             if cfg["rag_memory_enabled"]:
-                # === RECENT: always 32 pairs for continuity ===     === RECENT CONTEXT LIMIT INCREASE TO 64 TOTAL MESSAGES ===
-                recent_context = self.get_recent_conv(max_pairs=32)
+                # === RECENT: last RECENT_CONTEXT_PAIRS pairs for continuity ===
+                recent_context = self.get_recent_conv(max_pairs=RECENT_CONTEXT_PAIRS)
 
                 # === Build dedup set from recent ===
                 recent_lines = set()
@@ -1772,26 +1792,36 @@ class LLMClient:
                         if text:
                             recent_lines.add(text)
 
-                # === RAG: 2 extra pairs, deduplicated ===
-                rag_context = self.query_rag(prompt, top_k=4, recent_lines=recent_lines)
+                # === RAG: RAG_TOP_K // 2 extra pairs, deduplicated ===
+                rag_context = self.query_rag(prompt, top_k=RAG_TOP_K, recent_lines=recent_lines)
 
                 if rag_context:
                     memory_context += "=== SEMANTIC MEMORY ===\n"
                     memory_context += rag_context + "\n\n"
-                    logging.info("📚 RAG: 2 semantic pairs injected (deduplicated)")
 
                 if recent_context:
                     memory_context += "=== RECENT CONTEXT ===\n"
                     memory_context += recent_context + "\n"
-                    logging.info("🕐 Recent: 32 pairs injected (continuity)")
 
             else:
-                # === RAG OFF: only 32 recent pairs ===               === RECENT CONTEXT LIMIT INCREASE TO 64 TOTAL MESSAGES ===
-                recent_context = self.get_recent_conv(max_pairs=32)
+                # === RAG OFF: only the recent pairs ===
+                recent_context = self.get_recent_conv(max_pairs=RECENT_CONTEXT_PAIRS)
+                rag_context    = ""
                 if recent_context:
                     memory_context += "=== RECENT CONVERSATION ===\n"
                     memory_context += recent_context + "\n"
-                    logging.info("🕐 Recent: 32 pairs injected (RAG disabled)")
+
+            # === Real counts of what is injected into the prompt (no hardcoded numbers) ===
+            recent_pairs, recent_msgs = count_context_messages(recent_context)
+            rag_pairs,    rag_msgs    = count_context_messages(rag_context)
+            if cfg["rag_memory_enabled"]:
+                rag_state = f"{rag_pairs}/{RAG_TOP_K // 2} pairs ({rag_msgs} messages, {len(rag_context or '')} chars)"
+            else:
+                rag_state = "disabled"
+            logging.info(
+                f"💉 Context Injected → Recent: {recent_pairs}/{RECENT_CONTEXT_PAIRS} Pairs "
+                f"({recent_msgs} Messages, {len(recent_context or '')} Chars) \nRAG: {rag_state}"
+            )
 
             # === Inject memory into system prompt ===
             if memory_context:
@@ -1826,12 +1856,15 @@ class LLMClient:
                 "top_p":              cfg["top_p"]
             }
 
+            t_start  = time.perf_counter()
             response = requests.post(chat_url, json=payload)
+            elapsed  = time.perf_counter() - t_start
             if response.status_code != 200:
                 logging.error(f"LM Studio HTTP {response.status_code}: {response.text[:500]}")
                 return None
 
             data = response.json()
+            self._log_usage(data, elapsed, "Query")
             return data['choices'][0]['message']['content'].strip()
 
         except Exception as e:
@@ -1844,7 +1877,7 @@ class LLMClient:
         Dedicated LLM call for MCP chain execution.
         No system prompt, no memory context — clean focused call.
         """
-        logging.info("Thinking: MCP chain follow-up query")
+        logging.info("🧠 Thinking: MCP chain follow-up query")
 
         cfg = self.get_config()
 
@@ -1875,9 +1908,12 @@ class LLMClient:
                 "top_p":              cfg["top_p"]
             }
 
+            t_start  = time.perf_counter()
             response = requests.post(chat_url, json=payload)
+            elapsed  = time.perf_counter() - t_start
             response.raise_for_status()
             data = response.json()
+            self._log_usage(data, elapsed, "Chain")
             return data['choices'][0]['message']['content'].strip()
 
         except Exception as e:
@@ -1967,13 +2003,13 @@ class LLMClient:
         """Connect to MCP server and fetch system prompt."""
         try:
             cfg = self.get_config()
-            logging.info("🔄 Connecting to MCP server...")
+            logging.info("⏳ Connecting to MCP Server...")
 
             # === Step 1: Initialize ===
             init_result = self.mcp_request_with_retry("initialize", {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "clientInfo": {"name": "Advanced-STS-Local-AI-Assistant", "version": "0.1.9 Beta"}
+                "clientInfo": {"name": "Advanced-STS-Local-AI-Assistant", "version": "0.1.10 Beta"}
             })
 
             if not init_result:
@@ -1991,7 +2027,7 @@ class LLMClient:
             if messages:
                 self.mcp_system_prompt = messages[0]["content"]["text"]
                 self.mcp_connected     = True
-                logging.info(f"✅ MCP connected ({len(self.mcp_system_prompt)} chars prompt)")
+                logging.info(f"✅ MCP Connected ({len(self.mcp_system_prompt)} chars prompt)")
 
                 # === Notify GUI to update prompt_text ===
                 self.on_mcp_connected(self.mcp_system_prompt)
@@ -2015,11 +2051,11 @@ class LLMClient:
         """Start MCP server as background subprocess."""
         try:
             if self.mcp_server_process and self.mcp_server_process.poll() is None:
-                logging.info("[MCP] Server already running")
+                logging.info("✅ MCP Server already running")
                 return
 
             if not os.path.exists(MCP_SERVER_FILE):
-                logging.error(f"[MCP] Server file not found: {MCP_SERVER_FILE}")
+                logging.error(f"MCP Server file not found: {MCP_SERVER_FILE}")
                 return
 
             self.mcp_server_process = subprocess.Popen(
@@ -2027,11 +2063,11 @@ class LLMClient:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
-            logging.info(f"[MCP] Headless server started (PID: {self.mcp_server_process.pid})")
+            logging.info(f"✅ MCP Headless Server Started (PID: {self.mcp_server_process.pid})")
             time.sleep(2)
 
         except Exception as e:
-            logging.error(f"[MCP] Failed to start server: {str(e)}")
+            logging.error(f"MCP Failed to start server: {str(e)}")
 
     def stop_mcp_server_headless(self):
         """Stop MCP server subprocess."""
@@ -2039,9 +2075,9 @@ class LLMClient:
             try:
                 self.mcp_server_process.terminate()
                 self.mcp_server_process.wait(timeout=5)
-                logging.info("[MCP] Headless server stopped")
+                logging.info("✅ MCP Headless Server Stopped")
             except Exception as e:
-                logging.error(f"[MCP] Error stopping server: {str(e)}")
+                logging.error(f"MCP Error stopping server: {str(e)}")
             finally:
                 self.mcp_server_process = None
 
@@ -2055,7 +2091,7 @@ class LLMClient:
         Executes tools, feeds results back to LLM until final text answer.
         """
         if not self.mcp_connected:
-            logging.warning("⚠️ MCP not connected, returning initial response")
+            logging.warning("⚠️ MCP Not Connected, Returning Initial Response")
             return self.extract_text_response(initial_response)
 
         logging.info("🔗 Starting MCP chain execution...")
@@ -2088,16 +2124,13 @@ class LLMClient:
                 logging.info(f"\n📋 Tool Call #{idx}:")
                 logging.info(json.dumps(tool_call, indent=2, ensure_ascii=False))
 
-                self.append_log("MCP Request",  json.dumps(tool_call, ensure_ascii=False), visible=False)
-
+                # === MCP requests/responses are NOT saved to history or RAG — the full trace is in the debug log ===
                 result = self.execute_mcp_tool(tool_call)
-
-                self.append_log("MCP Response", json.dumps(result, ensure_ascii=False), visible=False)
 
                 results.append({"tool": tool_call.get("tool"), "result": result})
 
                 status = "✅" if result.get("ok") else "❌"
-                logging.info(f"  {status} Executed: {tool_call.get('tool')}\n")
+                logging.info(f"{status} Executed: {tool_call.get('tool')}\n")
 
             follow_up_prompt = self.build_mcp_follow_up_prompt(user_query, results)
             next_response    = self.query_chain(follow_up_prompt)
@@ -2343,7 +2376,7 @@ class AIAssistantGUI(QMainWindow):
         super().__init__()
         
         # ====== INITIALIZE GUI ======
-        self.setWindowTitle("= Advanced STS Local AI Assistant 0.1.9 Beta =")
+        self.setWindowTitle("= Advanced STS Local AI Assistant 0.1.10 Beta =")
         self.setGeometry(0, 0, 1326, 663)
         self.setFixedSize(1326, 663)
         
@@ -2382,7 +2415,7 @@ class AIAssistantGUI(QMainWindow):
         self.whisper_language = "en" 
         self.whisper_device = "cuda" if torch.cuda.is_available() else "cpu"  
         self.whisper_model = "small"
-        self.whisper_compute_type = "float16"  # === Set int8/float16 depending on your GPU (int8 for GTX or float16 for RTX Serries) ===
+        self.whisper_compute_type = "int8"  # === Set int8/float16 depending on your GPU (int8 for GTX or float16 for RTX Serries) ===
         self.chat_text = None
         self.debug_text = None
         self.vu_level_input = 0
@@ -2438,7 +2471,6 @@ class AIAssistantGUI(QMainWindow):
         # === LLMClient — handles LM Studio queries, MCP and tool chain execution ===
         self.llm = LLMClient(
             show_warning_signal       = self.show_warning_signal,
-            append_log_callback       = self.append_log,
             get_system_prompt         = lambda: self.prompt_text.toPlainText().strip(),
             get_recent_conv           = self.rag.get_recent_conversation,
             query_rag_callback        = self.rag.query,
@@ -2475,7 +2507,7 @@ class AIAssistantGUI(QMainWindow):
         self.ensure_default_profile() # === Ensures that always is an active profile ===
         # === NOTE: MCP init triggered via radio signal in _apply_settings_to_gui ===
         # === No explicit call here — would cause double init on startup ===
-        logging.info("Starting application")
+        logging.info("⏳ Starting Application...")
 
         self.tts.start()
         self.rag.start()
@@ -3542,7 +3574,8 @@ class AIAssistantGUI(QMainWindow):
     def on_device_change(self, device_type, device):
         if device_type == "whisper":
             self.whisper_device = device
-            self.audio.current_whisper_device = device
+            # === Do NOT touch audio.current_whisper_device here: transcribe_audio() compares it with the new ===
+            # === device and reloads the model on the next transcription (safe, same thread that uses it) ===
         elif device_type == "vad":
             self.vad_device = device
             self.current_vad_device = device
@@ -3655,7 +3688,7 @@ class AIAssistantGUI(QMainWindow):
             return
         new_text = current_text.strip() + "\n\n" + mcp_system_prompt
         self.prompt_text.setPlainText(new_text)
-        logging.info("MCP prompt added to UI")
+        logging.info("✅ MCP Prompt Added to UI")
 
     def toggle_recording(self):
         try:
@@ -3681,12 +3714,12 @@ class AIAssistantGUI(QMainWindow):
                     padding: 0px;
                 }
             """)
-            logging.info("Starting Audio Recording...")
+            logging.info("⏳ Starting Audio Recording...")
         else:
             self.is_recording = False
             self.audio.stop()
             self.stop_tts_stream() 
-            logging.info("Stopping Audio Recording...")
+            logging.info("⏳ Stopping Audio Recording...")
 
             def check_thread():
                 if self.audio_thread and self.audio_thread.is_alive():
@@ -3694,7 +3727,7 @@ class AIAssistantGUI(QMainWindow):
                 else:
                     self.audio.cleanup()
                     self.audio_thread = None
-                    logging.info("Audio thread stopped.")
+                    logging.info("✅ Audio Thread Stopped.")
                     self.start_stop_button.setText("Start")
                     self.start_stop_button.setStyleSheet("""
                         QPushButton {
@@ -3737,7 +3770,7 @@ class AIAssistantGUI(QMainWindow):
                     self.append_log("User", prompt_to_process)
                     should_process = True
                 else:
-                    logging.info("Wake word not detected.")
+                    logging.info("⚠️ Wake Word Not Detected.")
 
             if should_process:
                 initial_response = self.llm.query(prompt_to_process)
@@ -3774,7 +3807,7 @@ class AIAssistantGUI(QMainWindow):
                         if self.audio.recording_paused:
                             self.audio.recording_paused = False
                             self.audio.resume_event.set()
-                            logging.info("Microphone resumed after full TTS playback.")
+                            logging.info("🎤 Microphone Resumed After Full TTS Playback.")
 
         except Exception as e:
             logging.error(f"Error in process_audio_segment: {str(e)}")
@@ -3796,7 +3829,7 @@ class AIAssistantGUI(QMainWindow):
         self.chat_input.clear()
 
         # === Route through same pipeline as voice ===
-        logging.info(f"Manual input: {text}")
+        logging.info(f"🤚 Manual Input: {text}")
         self.append_log("User", text)
 
         # === Process in separate thread to avoid GUI freeze ===
@@ -3845,7 +3878,7 @@ class AIAssistantGUI(QMainWindow):
         self.current_profile_name = profile_name
         self.current_chat_log     = self.profiles.get_chat_log_path(profile_name)
         self.current_rag_dir      = self.profiles.ensure_profile_directories(profile_name)
-        logging.info(f"Profile paths switched → '{profile_name}'")
+        logging.info(f"✅ Profile Paths Switched → '{profile_name}'")
 
         self.update_profile_display(profile_name)
 
@@ -3961,7 +3994,7 @@ class AIAssistantGUI(QMainWindow):
 
         # === Jarvis is always hardcoded — never read from or written to JSON ===
         self.load_default_settings(silent=True)
-        logging.info("✅ Active profile at startup: 'Jarvis' (hardcoded defaults)")
+        logging.info("✅ Active Profile On Startup: 'Jarvis' (hardcoded defaults)")
 
     def _apply_settings_to_gui(self, settings):
         """Applies a settings dictionary to the GUI. Used by both load_settings and ensure_default_profile."""
@@ -4081,7 +4114,10 @@ class AIAssistantGUI(QMainWindow):
 
         if 'whisper_model' in settings:
             self.whisper_model = settings['whisper_model']
-            model_map = {"tiny": 0, "base": 1, "small": 2, "medium": 3, "large": 4}
+            # === Profiles saved before the rename store "large" — map it to the current folder name ===
+            if self.whisper_model == "large":
+                self.whisper_model = "large-v3"
+            model_map = {"tiny": 0, "base": 1, "small": 2, "medium": 3, "large-v3": 4}
             if self.whisper_model in model_map:
                 self.whisper_model_group.button(model_map[self.whisper_model]).setChecked(True)
 
@@ -4115,7 +4151,7 @@ class AIAssistantGUI(QMainWindow):
             self.prompt_text.setPlainText(settings['prompt_text'])
 
     def load_lm_models(self):
-        logging.info("Loading LM Studio models")
+        logging.info("⏳ Loading LM Studio Models...")
 
         models = self.llm.list_models(timeout=3)
 
@@ -4139,7 +4175,7 @@ class AIAssistantGUI(QMainWindow):
             else:
                 self.lm_model_dropdown.setCurrentIndex(0)
                 self.selected_lm_model = models[0]
-            logging.info(f"LM Studio models loaded: {models}")
+            logging.info(f"✅ LM Studio Models Loaded: {models}")
         else:
             self.lm_model_dropdown.addItem("No loaded models")
             logging.warning("No loaded LM Studio models")
@@ -4159,7 +4195,7 @@ class AIAssistantGUI(QMainWindow):
                 self.lm_model_dropdown.clear()
                 self.lm_model_dropdown.addItems(models)
                 self.selected_lm_model = models[0]
-                logging.info(f"Model detectat automat: {models[0]}")
+                logging.info(f"✅ LM Studio Models Detected: {models[0]}")
                 # === We turn off the refresh once we find a model ===
                 return
 
@@ -4170,33 +4206,29 @@ class AIAssistantGUI(QMainWindow):
         if self.lm_model_dropdown.count() == 0 or "No loaded models" in self.lm_model_dropdown.itemText(0):
             QTimer.singleShot(500, check)  # === Starts before 0.5s on startup ===
 
-    def append_log(self, role, text, visible=True):
+    def append_log(self, role, text):
         """
         Add message to chat history
-    
+
         Args:
-            role: "User", "Assistant", "MCP Request", "MCP Response"
+            role: "User" or "Assistant"
             text: Message content
-            visible: If False, do not display in UI (but it is saved and indexed)
         """
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.chat_history.append({
             "timestamp": timestamp,
             "role": role,
-            "text": text,
-            "visible": visible
+            "text": text
         })
-    
-        # === Show in UI only if visible=True ===
-        if visible:
-            display_role = role
-            color = "#00B200" if display_role == "User" else "#FFFF96"
-            self.chat_update_signal.emit(display_role, text, color)  # === Thread-safe: never touch widget directly ===
-    
+
+        # === Show in UI ===
+        color = "#00B200" if role == "User" else "#FFFF96"
+        self.chat_update_signal.emit(role, text, color)  # === Thread-safe: never touch widget directly ===
+
         # === Save to file (ALWAYS) ===
         with open(self.current_chat_log, "a", encoding="utf-8") as f:
             f.write(f"{timestamp} {role}: {text}\n\n")  # ← Dublu \n pentru rând gol
-    
+
         # === RAG indexing (ALWAYS) ===
         if self.rag_memory_enabled:
             self.rag.index_message(role, text, timestamp)
@@ -4215,7 +4247,7 @@ class AIAssistantGUI(QMainWindow):
         dialog.move(x, y)
 
         # === Version ===
-        version_label = QLabel("Version: 0.1.9 Beta", dialog)
+        version_label = QLabel("Version: 0.1.10 Beta", dialog)
         version_label.setGeometry(140, 2, 200, 20)
         version_label.setStyleSheet("color: #FFFF96; font-weight: bold; font-size: 10pt;")
 
@@ -4380,9 +4412,9 @@ class AIAssistantGUI(QMainWindow):
                 [sys.executable, MCP_SERVER_FILE],
                 cwd=MCP_SERVER_DIR
             )
-            logging.info("[MCP] GUI launched")
+            logging.info("MCP GUI launched")
         except Exception as e:
-            logging.error(f"[MCP] Failed to open GUI: {e}")
+            logging.error(f"MCP Failed to open GUI: {e}")
 
     def update_system_prompt_with_mcp(self, enabled):
         """Toggle MCP connection + start/stop headless server"""
@@ -4395,12 +4427,12 @@ class AIAssistantGUI(QMainWindow):
             self.llm.start_mcp_server_headless()
             if not self.llm.mcp_connected:
                 delay = 0 if was_running else 3000
-                logging.info(f"[MCP] Connecting in {delay}ms...")
+                logging.info(f"🕐 MCP Connecting in {delay}ms...")
                 QTimer.singleShot(delay, self.llm.initialize_mcp_connection)
         else:
             self.llm.mcp_connected = False
             self.llm.stop_mcp_server_headless()
-            logging.info("ℹ️ MCP disabled")
+            logging.info("✅ MCP Disabled")
 
     def release_gpu_memory(self):
         """Release GPU Memory"""
@@ -4580,9 +4612,9 @@ class AIAssistantGUI(QMainWindow):
                 if self.mcp_group.button(idx):
                     self.mcp_group.button(idx).setChecked(True)
 
-            logging.info(f"✅ Profile '{new_profile_name}' loaded successfully!")
+            logging.info(f"✅ Profile '{new_profile_name}' Loaded Successfully!")
             self.profile_modified = False
-            QMessageBox.information(self, "Success", f"Profile '{new_profile_name}' loaded successfully!")
+            QMessageBox.information(self, "Success", f"Profile '{new_profile_name}' Loaded Successfully!")
 
         except Exception as e:
             logging.error(f"Error loading settings: {str(e)}")
@@ -4668,26 +4700,26 @@ class AIAssistantGUI(QMainWindow):
         self.top_p_slider.setValue(95)
 
         # === SYSTEM PROMPT ===
-        self.prompt_text.setPlainText("Your name is Jarvis. You are a local AI assistant running on user's PC\nFirst you ask the user for his name, then continue the conversation using his/her name\n\nPERSONALITY:\n- Act natural, like with a close friend\n- Keep responses concise and on point\n- A little humor is welcome when appropriate\n\nLANGUAGE:\n- Always respond in the same language the user is speaking\n- If the user switches language mid-conversation, switch with them immediately\n\nSPEECH TO TEXT AWARENESS:\n- The user interacts with you via microphone\n- If something seems misspelled or unclear, use context to figure out what the user meant\n- Never point out transcription mistakes to the user\n\nTEXT TO SPEECH:\n- You talk to the user thru a TTS system with the voice of Jarvis\n- DO NOT USE ANY special characters or emoji otherwise you may sound unnatural\n\nMEMORY & CONTEXT:\n- You have access to conversation history and user context via RAG\n- Use this context naturally and don't announce that you're using it\n\nMCP TOOL USE:\n- When the user activates tool use mode, you will receive the available tools and their JSON schema dynamically\n- You detect when you are in tool use mode when user ask you to take an action that may match any possible combination of tools from the MCP server\n- In tool use mode, respond ONLY with valid JSON, no extra text, no explanations\n- In tool use mode you DON'T output commands that may affect the integrity of the data on user's machine UNLESS explicitly asked\n- In normal conversation mode, never output raw JSON\n\nGENERAL INSTRUCTIONS:\n- You do not know today's date. Before answering ANY question involving current events, recent releases, \"is X still true\", who currently holds a position, scores, prices, or anything time-sensitive — call system_datetime first\n- Treat your own trained knowledge as potentially outdated by default for anything related to the present moment. Verify with online rather than answering from memory alone\n- Only skip the search step for things that don't change over time (historical facts, general knowledge, how things work)\n\nBOUNDARIES:\n- You refuse any request that involves harming people or property\n- You refuse to engage in explicit sexual conversations\n- Do so briefly and respectfully, without lecturing\n")
+        self.prompt_text.setPlainText("Your name is Jarvis. You are a local AI assistant running on user's PC\nFirst you ask the user for his name, then continue the conversation using his/her name\n\nPERSONALITY:\n- Act natural, like with a close friend\n- Keep responses concise and on point\n- A little humor is welcome when appropriate\n\nLANGUAGE:\n- Always respond in the same language the user is speaking\n- If the user switches language mid-conversation, switch with them immediately\n\nSPEECH TO TEXT AWARENESS:\n- The user interacts with you via microphone\n- If something seems misspelled or unclear, use context to figure out what the user meant\n- Never point out transcription mistakes to the user\n\nTEXT TO SPEECH:\n- You talk to the user thru a TTS system with the voice of Jarvis\n- DO NOT USE ANY special characters or emoji otherwise you may sound unnatural\n\nMEMORY & CONTEXT:\n- You have access to conversation history and user context via RAG\n- Use this context naturally and don't announce that you're using it\n\nMCP TOOL USE:\n- When the user activates tool use mode, you will receive the available tools and their JSON schema dynamically\n- You detect when you are in tool use mode when user ask you to take an action that may match any possible combination of tools from the MCP server\n- In tool use mode, respond ONLY with valid JSON, no extra text, no explanations\n- In tool use mode you DON'T output commands that may affect the integrity of the data on user's machine UNLESS explicitly asked\n- In normal conversation mode, never output raw JSON\n\nGENERAL INSTRUCTIONS:\n- You do not know today's date. Before answering ANY question involving current events, recent releases, \"is X still true\", who currently holds a position, scores, prices, or anything time-sensitive — call system_datetime first\n- Treat your own trained knowledge as potentially outdated by default for anything related to the present moment. Verify online rather than answering from memory alone\n- Only skip the search step for things that don't change over time (historical facts, general knowledge, how things work)\n\nBOUNDARIES:\n- You refuse any request that involves harming people or property\n- You refuse to engage in explicit sexual conversations\n- Do so briefly and respectfully, without lecturing\n")
 
         # === Reset profile paths to default "Jarvis" ===
         self.switch_profile_paths("Jarvis")
         self.profile_modified = False
-        logging.info("Profile paths reset to default 'Jarvis'.")
+        logging.info("✅ Profile Paths Reset To Default 'Jarvis'.")
 
-        logging.info("Default settings loaded.")
+        logging.info("✅ Default Settings Loaded.")
         if not silent:
-            QMessageBox.information(self, "Success", "Default settings loaded successfully")
+            QMessageBox.information(self, "Success", "Default Settings Loaded Successfully")
 
     def load_initial_chat_history(self):
-        """Load chat history at startup — includes MCP Request/Response entries"""
+        """Load chat history at startup — User/Assistant only (old MCP entries in existing logs are ignored)"""
         try:
             if os.path.exists(self.current_chat_log):
                 with open(self.current_chat_log, "r", encoding="utf-8") as f:
                     lines = f.readlines()
 
-                self.chat_history = self.profiles.parse_chat_file(lines, include_mcp=True)
-                logging.info(f"Initial chat history loaded: {len(self.chat_history)} messages")
+                self.chat_history = self.profiles.parse_chat_file(lines)
+                logging.info(f"✅ Initial Chat History Loaded: {len(self.chat_history)} Messages")
                 self.update_chat_display()
 
         except Exception as e:
@@ -4707,7 +4739,7 @@ class AIAssistantGUI(QMainWindow):
             with open(file_path, "r", encoding="utf-8") as f:
                 self.prompt_text.setPlainText(f.read())
             logging.info(f"Prompt loaded from {file_path}")
-            QMessageBox.information(self, "Success", "Prompt loaded successfully")
+            QMessageBox.information(self, "Success", "Prompt Loaded Successfully")
 
     def save_chat_history(self):
         file_path, _ = QFileDialog.getSaveFileName(self, "Save Chat History", HISTORY_DIR, "Text Files (*.txt);;All Files (*)")
@@ -4728,10 +4760,10 @@ class AIAssistantGUI(QMainWindow):
             with open(file_path, "r", encoding="utf-8") as f:
                 lines = f.readlines()
 
-            self.chat_history = self.profiles.parse_chat_file(lines, include_mcp=False)
+            self.chat_history = self.profiles.parse_chat_file(lines)
             self.update_chat_display()
-            logging.info(f"Chat history loaded from {file_path}: {len(self.chat_history)} messages")
-            QMessageBox.information(self, "Success", f"Chat history loaded successfully\n{len(self.chat_history)} messages loaded")
+            logging.info(f"✅ Chat History Loaded From {file_path}: {len(self.chat_history)} Messages")
+            QMessageBox.information(self, "Success", f"Chat History Loaded Successfully\n{len(self.chat_history)} Messages Loaded")
         
         except Exception as e:
             logging.error(f"Error loading chat history from {file_path}: {str(e)}")
@@ -4755,14 +4787,14 @@ class AIAssistantGUI(QMainWindow):
             try:
                 with open(self.current_chat_log, "w", encoding="utf-8") as f:
                     pass
-                logging.info("✅ Chat log file cleared.")
+                logging.info("✅ Chat Log File Cleared.")
             except Exception as e:
                 logging.error(f"❌ Error clearing chat log file: {str(e)}")
 
             # === 3. Full RAG reset — encapsulated in RAGManager.clear() ===
             self.rag.clear()
 
-            logging.info("✅ Chat history and RAG database fully reset.")
+            logging.info("✅ Chat History And RAG Database Fully Reset.")
             QMessageBox.information(
                 self, 
                 "Success", 
@@ -4824,8 +4856,8 @@ class AIAssistantGUI(QMainWindow):
         reply = QMessageBox.question(
             self,
             "Confirm Rebuild",
-            f"Current RAG Database: {current_docs} documents\n"
-            f"Chat History: {len(self.chat_history)} messages\n\n"
+            f"Current RAG Database: {current_docs} Documents\n"
+            f"Chat History: {len(self.chat_history)} Messages\n\n"
             f"This will:\n"
             f"• Clear existing RAG database\n"
             f"• Rebuild from current chat history\n\n"
@@ -4840,10 +4872,10 @@ class AIAssistantGUI(QMainWindow):
         try:
             logging.info("🔄 Starting RAG database rebuild...")
 
-            # === include_mcp=True — AI also "remembers" previous tool calls/results ===
-            messages_indexed = self.rag.rebuild(self.chat_history, include_mcp=True)
+            # === Rebuild from User/Assistant history only (this also purges any old MCP entries from the RAG database) ===
+            messages_indexed = self.rag.rebuild(self.chat_history)
 
-            logging.info(f"✅ Queued {messages_indexed} messages for indexing")
+            logging.info(f"✅ Queued {messages_indexed} Messages For Indexing")
         
             # === Waits a bit for RAG worker to process ===
             QTimer.singleShot(2000, lambda: self.show_rebuild_complete(messages_indexed))
@@ -4853,7 +4885,7 @@ class AIAssistantGUI(QMainWindow):
                 self,
                 "Rebuild Started",
                 f"RAG rebuild started!\n\n"
-                f"Indexing {messages_indexed} messages...\n"
+                f"Indexing {messages_indexed} Messages...\n"
                 f"Check Debug Console for progress."
             )
         
@@ -4874,8 +4906,8 @@ class AIAssistantGUI(QMainWindow):
                 self,
                 "Rebuild Complete",
                 f"✅ RAG database rebuilt!\n\n"
-                f"Expected: {expected_count} messages\n"
-                f"Indexed: {actual_count} documents\n\n"
+                f"Expected: {expected_count} Messages\n"
+                f"Indexed: {actual_count} Documents\n\n"
                 f"Memory is now up to date!"
             )
         
@@ -4885,29 +4917,21 @@ class AIAssistantGUI(QMainWindow):
             logging.error(f"Error checking rebuild status: {str(e)}")
 
     def update_chat_display(self):
-        """Displays only visible messeges in UI"""
+        """Displays the whole chat history in the UI (chronological order)"""
         self.chat_text.clear()
 
-        logging.info(f"🐛 Total messages: {len(self.chat_history)}")
-        for i, entry in enumerate(self.chat_history):
-            role = entry.get('role', 'UNKNOWN')
-            visible = entry.get('visible', 'MISSING')
-            text_preview = entry.get('text', '')[:30]
-            logging.info(f"🐛 [{i}] {role} | visible={visible} | '{text_preview}...'")
-
+        logging.info(f"✅ Chat Display Refreshed: {len(self.chat_history)} Messages")
 
         # === Chronological sorting before display ===
         sorted_history = sorted(self.chat_history, key=lambda x: x.get('timestamp', ''))
-    
+
         for entry in sorted_history:
-            # === Skip MCP messages în UI - display only User/Assistant ===
-            if entry.get("visible", True):  
-                role = entry['role']
-                text = entry['text']
-                color = "#00B200" if role == "User" else "#FFFF96"
-                # === Reuse the same widget-writing logic as append_log() ===
-                # === Same code path whether it's one live message or a full history rebuild ===
-                self._append_chat_safe(role, text, color)
+            role  = entry['role']
+            text  = entry['text']
+            color = "#00B200" if role == "User" else "#FFFF96"
+            # === Reuse the same widget-writing logic as append_log() ===
+            # === Same code path whether it's one live message or a full history rebuild ===
+            self._append_chat_safe(role, text, color)
 
     def closeEvent(self, event):
         # === Ask to save if unsaved changes exist ===
@@ -4926,7 +4950,7 @@ class AIAssistantGUI(QMainWindow):
         # === Stop the headless MCP Server if it runs ===
         if self.use_mcp_server:
             self.llm.stop_mcp_server_headless()
-            logging.info("[MCP] Server stopped on application close")
+            logging.info("MCP Server stopped on application close")
         super().closeEvent(event)
 
 if __name__ == "__main__":
