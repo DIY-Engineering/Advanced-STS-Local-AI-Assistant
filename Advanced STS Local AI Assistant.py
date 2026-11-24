@@ -135,6 +135,11 @@ VAD_WINDOW_SIZE = 512
 VAD_MIN_SPEECH_DURATION = 1.0
 VAD_MIN_SILENCE_DURATION = 1.5
 
+# ====== TTS PLAYBACK CONFIG ======
+TTS_STALL_TIMEOUT_SEC    = 10     # === Playback is aborted only if NO audio chunk was written for this long (no total time limit) ===
+TTS_WAIT_POLL_SEC        = 0.25   # === Polling interval while waiting for playback / completion ===
+TTS_MIC_RESUME_DELAY_SEC = 0.18   # === Safety margin after playback ends, before the microphone is resumed (Standard Mode) ===
+
 # ====== LLM CONTEXT CONFIG (recent conversation + RAG memory injected on every LLM query) ======
 RECENT_CONTEXT_PAIRS  = 32     # === Recent User->Assistant pairs injected into the system prompt (32 pairs = 64 messages) ===
 RECENT_MSG_MAX_CHARS  = 1000   # === Max characters kept per recent message (User or Assistant) ===
@@ -153,8 +158,8 @@ def count_context_messages(context):
     return pairs, len(lines)
 
 ModelManager.models_dir = COQUI_MODELS_DIR
-logging.info(f"Folder structure initialized — {_created} new folder(s) created")
-logging.info(f"Coqui TTS models will be stored in: {COQUI_MODELS_DIR}")
+logging.info(f"✅ Folder Structure Initialized — {_created} New Folder(s) Created")
+logging.info(f"✅ Coqui TTS Models Will Be Stored In: {COQUI_MODELS_DIR}")
 
 # ====== CSS STYLES ======
 SCROLLBAR_STYLE = """
@@ -401,7 +406,7 @@ class ProfileManager:
         """Write settings dict as JSON to file_path."""
         with open(file_path, 'w', encoding='utf-8') as f:
             json.dump(settings_dict, f, indent=2, ensure_ascii=False)
-        logging.info(f"Settings saved to {file_path}")
+        logging.info(f"✅ Settings Saved To {file_path}")
 
     def load_profile(self, file_path):
         """Read settings dict from JSON file_path. Returns None on failure."""
@@ -460,7 +465,7 @@ class ProfileManager:
             file_path = os.path.join(self.settings_dir, f"{profile_name}.json")
             if os.path.exists(file_path):
                 os.remove(file_path)
-                logging.info(f"Profile deleted: {profile_name}")
+                logging.info(f"✅ Profile Deleted: {profile_name}")
                 return True
             return False
         except Exception as e:
@@ -602,7 +607,7 @@ class RAGManager:
                 metadata={"hnsw:space": "cosine"}
             )
             self._cleanup_orphaned_rag_folders(new_rag_dir)
-            logging.info(f"✅ RAG Reinitialized → '{new_rag_dir}' | Docs: {self.rag_collection.count()}")
+            logging.info(f"✅ RAG Reinitialized → '{new_rag_dir}' → Docs: {self.rag_collection.count()}")
 
         except Exception as e:
             logging.error(f"RAG reinit error: {str(e)}")
@@ -643,7 +648,7 @@ class RAGManager:
             existing_ids = existing.get('ids', [])
             if existing_ids:
                 self.rag_collection.delete(ids=existing_ids)
-                logging.info(f"✅ Cleared {len(existing_ids)} existing documents")
+                logging.info(f"✅ Cleared {len(existing_ids)} Existing Documents")
 
             history = chat_history if chat_history is not None else self.get_chat_history()
             count = 0
@@ -679,7 +684,7 @@ class RAGManager:
         try:
             if self.rag_client is not None:
                 self.rag_client.reset()
-                logging.info("ChromaDB reset() called — all file handles released.")
+                logging.info("✅ ChromaDB Reset() Called → All File Handles Released.")
         except Exception as e:
             logging.error(f"Error during ChromaDB reset: {str(e)}")
         finally:
@@ -687,14 +692,14 @@ class RAGManager:
             self.rag_client     = None
             gc.collect()
             time.sleep(0.3)
-            logging.info("ChromaDB client closed.")
+            logging.info("✅ ChromaDB Client Closed.")
 
     def start_worker(self):
         """Restart the RAG worker thread (after release_for_move + switch_profile)."""
         self.rag_event.clear()
         self.rag_thread = threading.Thread(target=self.rag_worker, daemon=True)
         self.rag_thread.start()
-        logging.info("✅ RAG worker thread restarted.")
+        logging.info("✅ RAG Worker Thread Restarted.")
 
     def clear(self):
         """
@@ -742,7 +747,7 @@ class RAGManager:
                         conn.execute("VACUUM")
                         conn.close()
                         size_kb = os.path.getsize(sqlite_path) / 1024
-                        logging.info(f"✅ SQLite VACUUM Complete — File Size: {size_kb:.1f} KB")
+                        logging.info(f"✅ SQLite VACUUM Complete → File Size: {size_kb:.1f} KB")
                     except Exception as ve:
                         logging.warning(f"VACUUM failed (non-critical): {str(ve)}")
             else:
@@ -758,7 +763,7 @@ class RAGManager:
             self.rag_event.clear()
             self.rag_thread = threading.Thread(target=self.rag_worker, daemon=True)
             self.rag_thread.start()
-            logging.info("✅ RAG Worker Thread Restarted.")
+            logging.info("♻️ RAG Worker Thread Restarted.")
         except Exception as e:
             logging.error(f"Error restarting RAG thread: {str(e)}")
 
@@ -1137,7 +1142,7 @@ class AudioProcessor:
             self.current_whisper_device = None
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            logging.info("Whisper model released from memory.")
+            logging.info("✅ Whisper Model Released From Memory.")
 
     # ==================
     # === SILERO VAD ===
@@ -1146,7 +1151,7 @@ class AudioProcessor:
     def init_silero_vad(self):
         """Load Silero VAD model from local path."""
         cfg = self.get_config()
-        logging.info("Loading Silero VAD model")
+        logging.info("✅ Loading Silero VAD Model")
         try:
             vad_model_path = os.path.join(BASE_DIR, "Silero VAD", "Models", "silero_vad.jit")
             if not os.path.exists(vad_model_path):
@@ -1154,7 +1159,7 @@ class AudioProcessor:
 
             self.vad_model = torch.jit.load(vad_model_path, map_location=cfg["vad_device"])
             self.vad_model.eval()
-            logging.info(f"Silero VAD loaded on {cfg['vad_device']}")
+            logging.info(f"✅ Silero VAD Loaded On {cfg['vad_device']}")
 
         except Exception as e:
             logging.error(f"Silero VAD Error: {str(e)}")
@@ -1241,7 +1246,7 @@ class AudioProcessor:
                         # === BARGE-IN (Real Talk mode) ===
                         if speech_prob > cfg["vad_threshold"]:
                             if self.is_real_talk() and self.is_tts_active():
-                                logging.info("REAL TALK: Barge-in detected! Stopping TTS...")
+                                logging.info("✅ REAL TALK: Barge-in Detected! Stopping TTS...")
                                 self.stop_tts()
                                 time.sleep(0.05)
                                 frames                  = []
@@ -1251,7 +1256,7 @@ class AudioProcessor:
 
                         if speech_prob > cfg["vad_threshold"]:
                             if not recording_active:
-                                logging.info("Speech Started")
+                                logging.info("✅ Speech Started")
                                 recording_active = True
                             frames.append(audio_data.tobytes())
                             speech_detected_frames  += 1
@@ -1263,7 +1268,7 @@ class AudioProcessor:
                                 if (silence_detected_frames >= min_silence_frames and
                                         speech_detected_frames >= min_speech_frames):
                                     # === END OF SPEECH ===
-                                    logging.info("Speech Ended")
+                                    logging.info("✅ Speech Ended")
 
                                     if not self.is_real_talk():
                                         self.pause_mic()
@@ -1302,7 +1307,7 @@ class AudioProcessor:
         finally:
             self.cleanup()
             if self.is_real_talk() and not self.stop_event.is_set():
-                logging.info("Real Talk: restarting recording loop...")
+                logging.info("✅ Real Talk: Restarting Recording Loop...")
 
     # ===================
     # === WHISPER STT ===
@@ -1323,7 +1328,7 @@ class AudioProcessor:
             if self.faster_whisper_model is None or model_changed or device_changed:
                 # === Release old model ===
                 if self.faster_whisper_model is not None:
-                    logging.info(f"Unloading old Whisper model: {self.current_whisper_model}")
+                    logging.info(f"✅ Unloading Old Whisper Model: {self.current_whisper_model}")
                     self.release_whisper()
 
                 # === Find local model path ===
@@ -1339,8 +1344,8 @@ class AudioProcessor:
                 # === Compute type ===
                 compute_type = "int8" if device == "cpu" else "int8" # === Set int8/float16 depending on your GPU (int8 for GTX or float16 for RTX Serries) ===
 
-                logging.info(f"⏳ Loading Faster-Whisper: {model_name} from {model_path}")
-                logging.info(f"Device: {device} | Compute: {compute_type}")
+                logging.info(f"⏳ Loading Faster-Whisper: {model_name} From {model_path}")
+                logging.info(f"✅ Device: {device} → Compute: {compute_type}")
 
                 try:
                     self.faster_whisper_model = WhisperModel(
@@ -1378,7 +1383,7 @@ class AudioProcessor:
             transcription = " ".join([segment.text for segment in segments]).strip()
 
             if language is None:
-                logging.info(f"Detected language: {info.language} ({info.language_probability:.0%})")
+                logging.info(f"✅ Detected Language: {info.language} ({info.language_probability:.0%})")
 
             if transcription:
                 logging.info(f"📝 Transcription: {transcription}")
@@ -1386,7 +1391,7 @@ class AudioProcessor:
             return transcription if transcription else None
 
         except Exception as e:
-            logging.error(f"Transcription error: {str(e)}")
+            logging.error(f"⚠️ Transcription Error: {str(e)}")
             logging.error(traceback.format_exc())
             return None
 
@@ -1459,6 +1464,10 @@ class TTSEngine:
         self.tts_event.set()
         self.tts_queue.put(None)
 
+    def is_worker_alive(self):
+        """True while the TTS worker thread is running (callers use it to avoid waiting forever for a completion signal)."""
+        return bool(getattr(self, "tts_thread", None) and self.tts_thread.is_alive())
+
     def speak(self, text, completion_event=None):
         """
         Queue text for TTS playback.
@@ -1477,15 +1486,26 @@ class TTSEngine:
 
         # === Flush pending queue ===
         with self.tts_queue.mutex:
+            dropped = list(self.tts_queue.queue)
             self.tts_queue.queue.clear()
 
-        # === Stop PyAudio stream ===
-        with self.tts_lock:
-            if self.current_tts_stream and self.current_tts_stream.is_active():
-                try:
-                    self.current_tts_stream.stop_stream()
-                except:
-                    pass
+        # === Wake up anyone waiting on the completion event of a dropped item (otherwise they wait forever) ===
+        for item in dropped:
+            if item is not None and item[1] is not None:
+                item[1].set()
+
+        # === Stop PyAudio stream — bounded lock wait: a stalled write() holds the lock and must not freeze the caller ===
+        if self.tts_lock.acquire(timeout=1.0):
+            try:
+                if self.current_tts_stream and self.current_tts_stream.is_active():
+                    try:
+                        self.current_tts_stream.stop_stream()
+                    except:
+                        pass
+            finally:
+                self.tts_lock.release()
+        else:
+            logging.warning("TTS lock busy — stream stop skipped.")
 
         self.tts_active = False
         self.vu_output_signal.emit(0)
@@ -1516,7 +1536,7 @@ class TTSEngine:
             self.speaker_latents = None
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            logging.info("TTS GPU memory released.")
+            logging.info("✅ TTS GPU Memory Released.")
 
     # ================================
     # === INTERNAL — WORKER THREAD ===
@@ -1588,8 +1608,9 @@ class TTSEngine:
                     )
 
                     # === Playback queue — decouples GPU generation from audio playback ===
-                    playback_queue = queue.Queue(maxsize=0)
-                    playback_done  = threading.Event()
+                    playback_queue    = queue.Queue(maxsize=0)
+                    playback_done     = threading.Event()
+                    playback_progress = {"t": time.monotonic()}   # === Last successful write() — used for stall detection ===
 
                     def playback_thread_func():
                         try:
@@ -1615,6 +1636,7 @@ class TTSEngine:
                                 with self.tts_lock:
                                     if stream.is_stopped(): stream.start_stream()
                                     stream.write(chunk.tobytes())
+                                playback_progress["t"] = time.monotonic()
 
                         except Exception as e:
                             logging.error(f"Playback thread error: {e}")
@@ -1628,7 +1650,7 @@ class TTSEngine:
                     # === GPU generates chunks and feeds the playback queue ===
                     for audio_chunk in audio_chunks:
                         if self.stop_tts_flag.is_set():
-                            logging.info("TTS interrupted.")
+                            logging.info("✅ TTS Interrupted.")
                             break
 
                         audio_data_full = (audio_chunk.squeeze().cpu().numpy() * 32767).astype(np.int16)
@@ -1643,19 +1665,36 @@ class TTSEngine:
                     # === Send sentinel — signals end of generation ===
                     playback_queue.put(None)
 
-                    # === Wait for playback thread to fully finish ===
-                    if not playback_done.wait(timeout=45):
-                        logging.warning("Playback timeout!")
+                    # === Wait for the playback thread to fully finish — NO total time limit ===
+                    # === Long responses can legitimately play for minutes; only a STALLED write() is an error ===
+                    wait_started = time.monotonic()
+                    playback_progress["t"] = wait_started    # === Reset: generation time must not count as a stall ===
+                    playback_stalled = False
+                    while not playback_done.wait(timeout=TTS_WAIT_POLL_SEC):
+                        if self.tts_event.is_set():
+                            break  # === Shutdown ===
+                        if time.monotonic() - playback_progress["t"] > TTS_STALL_TIMEOUT_SEC:
+                            logging.error(f"Playback stalled: no audio written for {TTS_STALL_TIMEOUT_SEC}s — aborting playback.")
+                            self.stop_tts_flag.set()   # === Makes the playback thread flush its queue and exit ===
+                            playback_stalled = True
+                            break
 
-                    # === Final hardware buffer drain ===
-                    with self.tts_lock:
-                        if stream and stream.is_active():
-                            try:
-                                stream.stop_stream()
-                                time.sleep(0.1)  # === Small hardware drain margin ===
-                                stream.start_stream()
-                            except:
-                                pass
+                    backlog_sec = time.monotonic() - wait_started
+                    if backlog_sec > 1.0:
+                        logging.info(f"⏳ Playback Backlog Drained In {backlog_sec:.1f}s After Generation Ended")
+
+                    # === Final hardware buffer drain — bounded lock wait, because a stalled write() holds the lock ===
+                    if not playback_stalled and self.tts_lock.acquire(timeout=2):
+                        try:
+                            if stream and stream.is_active():
+                                try:
+                                    stream.stop_stream()
+                                    time.sleep(0.1)  # === Small hardware drain margin ===
+                                    stream.start_stream()
+                                except:
+                                    pass
+                        finally:
+                            self.tts_lock.release()
 
                 except queue.Empty:
                     continue
@@ -1669,7 +1708,7 @@ class TTSEngine:
                     # === completion_event.set() called AFTER full hardware drain ===
                     if completion_event is not None:
                         completion_event.set()
-                        logging.info("✅ TTS Completion Signaled — Audio Fully Played.")
+                        logging.info("✅ TTS Completion Signaled → Audio Fully Played.")
 
         except Exception as e:
             logging.error(f"Critical TTS Worker Error: {str(e)}")
@@ -1706,7 +1745,7 @@ class TTSEngine:
             speaker_wav                        = os.path.join(COQUI_SAMPLES_DIR, self.selected_coqui_sample)
             gpt_cond_latent, speaker_embedding = self.coqui_model.get_conditioning_latents(audio_path=[speaker_wav])
             self.speaker_latents               = (gpt_cond_latent, speaker_embedding)
-            logging.info(f"🐸 XTTS Latents Recalculated for: {self.selected_coqui_sample}")
+            logging.info(f"🐸 XTTS Latents Recalculated For: {self.selected_coqui_sample}")
 
 
 class LLMClient:
@@ -1764,7 +1803,7 @@ class LLMClient:
         Main LLM query — injects system prompt, RAG memory and recent context.
         Used for all standard user interactions.
         """
-        logging.info("🧠 Thinking: Processing prompt with LM Studio")
+        logging.info("🧠 Thinking: Processing Prompt With LM Studio")
 
         cfg = self.get_config()
 
@@ -1877,7 +1916,7 @@ class LLMClient:
         Dedicated LLM call for MCP chain execution.
         No system prompt, no memory context — clean focused call.
         """
-        logging.info("🧠 Thinking: MCP chain follow-up query")
+        logging.info("🧠 Thinking: MCP Chain Follow-up Query")
 
         cfg = self.get_config()
 
@@ -2003,13 +2042,13 @@ class LLMClient:
         """Connect to MCP server and fetch system prompt."""
         try:
             cfg = self.get_config()
-            logging.info("⏳ Connecting to MCP Server...")
+            logging.info("⏳ Connecting To MCP Server...")
 
             # === Step 1: Initialize ===
             init_result = self.mcp_request_with_retry("initialize", {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "clientInfo": {"name": "Advanced-STS-Local-AI-Assistant", "version": "0.1.10 Beta"}
+                "clientInfo": {"name": "Advanced-STS-Local-AI-Assistant", "version": "0.1.11 Beta"}
             })
 
             if not init_result:
@@ -2027,7 +2066,7 @@ class LLMClient:
             if messages:
                 self.mcp_system_prompt = messages[0]["content"]["text"]
                 self.mcp_connected     = True
-                logging.info(f"✅ MCP Connected ({len(self.mcp_system_prompt)} chars prompt)")
+                logging.info(f"✅ MCP Connected ({len(self.mcp_system_prompt)} Chars Prompt)")
 
                 # === Notify GUI to update prompt_text ===
                 self.on_mcp_connected(self.mcp_system_prompt)
@@ -2051,7 +2090,7 @@ class LLMClient:
         """Start MCP server as background subprocess."""
         try:
             if self.mcp_server_process and self.mcp_server_process.poll() is None:
-                logging.info("✅ MCP Server already running")
+                logging.info("✅ MCP Server Already Running")
                 return
 
             if not os.path.exists(MCP_SERVER_FILE):
@@ -2094,7 +2133,7 @@ class LLMClient:
             logging.warning("⚠️ MCP Not Connected, Returning Initial Response")
             return self.extract_text_response(initial_response)
 
-        logging.info("🔗 Starting MCP chain execution...")
+        logging.info("🔗 Starting MCP Chain Execution...")
 
         cfg = self.get_config()
 
@@ -2114,10 +2153,10 @@ class LLMClient:
             tool_calls    = self.parse_tool_calls(last_response)
 
             if not tool_calls:
-                logging.info("✅ MCP chain complete - no more tool calls")
+                logging.info("✅ MCP Chain Complete → No More Tool Calls")
                 break
 
-            logging.info(f"🔧 Executing {len(tool_calls)} tool(s)...")
+            logging.info(f"🔧 Executing {len(tool_calls)} Tool(s)...")
             results = []
 
             for idx, tool_call in enumerate(tool_calls, 1):
@@ -2157,7 +2196,7 @@ class LLMClient:
         elif not clean_response:
             clean_response = "Done."
 
-        logging.info(f"✅ MCP chain finished after {len(conversation)//2} iterations")
+        logging.info(f"✅ MCP Chain Finished After {len(conversation)//2} Iterations")
         return clean_response
 
     def build_mcp_follow_up_prompt(self, original_query, tool_results):
@@ -2256,7 +2295,7 @@ NOW respond based on the results above:"""
             tool_name = tool_call.get("tool", "")
             arguments = tool_call.get("arguments", {})
 
-            logging.info(f"🔧 Calling MCP tool: {tool_name}")
+            logging.info(f"🔧 Calling MCP Tool: {tool_name}")
 
             result = self.mcp_request("tools/call", {
                 "name":      tool_name,
@@ -2350,8 +2389,8 @@ NOW respond based on the results above:"""
                 tool_calls.append(parsed)
 
         if tool_calls:
-            logging.info(f"✅ Parsed tool call: {tool_calls[0].get('tool')} (id: {tool_calls[0].get('id')})")
-            logging.info(f"📦 Total tool calls parsed: {len(tool_calls)}")
+            logging.info(f"✅ Parsed Tool Call: {tool_calls[0].get('tool')} (id: {tool_calls[0].get('id')})")
+            logging.info(f"📦 Total Tool Calls Parsed: {len(tool_calls)}")
 
         return tool_calls
 
@@ -2376,7 +2415,7 @@ class AIAssistantGUI(QMainWindow):
         super().__init__()
         
         # ====== INITIALIZE GUI ======
-        self.setWindowTitle("= Advanced STS Local AI Assistant 0.1.10 Beta =")
+        self.setWindowTitle("= Advanced STS Local AI Assistant 0.1.11 Beta =")
         self.setGeometry(0, 0, 1326, 663)
         self.setFixedSize(1326, 663)
         
@@ -3766,7 +3805,7 @@ class AIAssistantGUI(QMainWindow):
                 if wake_word_str and wake_word_str in transcription_lower:
                     wake_index        = transcription_lower.index(wake_word_str)
                     prompt_to_process = transcription[wake_index:]
-                    logging.info(f"Wake word detected: {prompt_to_process}")
+                    logging.info(f"✅ Wake Word Detected: {prompt_to_process}")
                     self.append_log("User", prompt_to_process)
                     should_process = True
                 else:
@@ -3781,10 +3820,10 @@ class AIAssistantGUI(QMainWindow):
                 tool_calls = self.llm.parse_tool_calls(initial_response)
 
                 if tool_calls and self.use_mcp_server:
-                    logging.info("🔗 MCP workflow detected")
+                    logging.info("🔗 MCP Workflow Detected")
                     final_response_text = self.llm.mcp_chain_executor(prompt_to_process, initial_response)
                 else:
-                    logging.info("💬 Simple chat mode")
+                    logging.info("💬 Simple Chat Mode")
                     final_response_text = self.llm.extract_text_response(initial_response)
 
                 if final_response_text:
@@ -3795,13 +3834,15 @@ class AIAssistantGUI(QMainWindow):
                     self.tts.speak(final_response_text, completion_event)
 
                     if not self.real_talk_enabled:
-                        # === Wait for confirmed TTS completion from playback thread ===
-                        completed = completion_event.wait(timeout=50)
-                        if not completed:
-                            logging.warning("TTS completion timeout!")
+                        # === Wait for confirmed TTS completion — NO fixed timeout (long responses can take minutes) ===
+                        # === Exits early only if the TTS worker died or the app is shutting down ===
+                        while not completion_event.wait(timeout=TTS_WAIT_POLL_SEC):
+                            if not self.tts.is_worker_alive() or self.tts.tts_event.is_set():
+                                logging.warning("TTS worker stopped — not waiting for completion anymore.")
+                                break
 
                         # === Safety margin for hardware audio subsystem ===
-                        time.sleep(0.18)
+                        time.sleep(TTS_MIC_RESUME_DELAY_SEC)
 
                         # === Resume mic only after TTS fully finished ===
                         if self.audio.recording_paused:
@@ -3856,10 +3897,10 @@ class AIAssistantGUI(QMainWindow):
             tool_calls = self.llm.parse_tool_calls(initial_response)
 
             if tool_calls and self.use_mcp_server:
-                logging.info("🔗 MCP workflow detected")
+                logging.info("🔗 MCP Workflow Detected")
                 final_response_text = self.llm.mcp_chain_executor(prompt_to_process, initial_response)
             else:
-                logging.info("💬 Simple chat mode")
+                logging.info("💬 Simple Chat Mode")
                 final_response_text = self.llm.extract_text_response(initial_response)
 
             if final_response_text:
@@ -3956,7 +3997,7 @@ class AIAssistantGUI(QMainWindow):
                             json.dump(settings_dict, f, indent=2, ensure_ascii=False)
                         new_name = os.path.splitext(os.path.basename(file_path))[0]
                         self.profile_modified = False
-                        logging.info(f"✅ Jarvis changes saved as '{new_name}'")
+                        logging.info(f"✅ Jarvis Changes Saved As '{new_name}'")
                     except Exception as e:
                         logging.error(f"❌ Save As failed: {e}")
                     break
@@ -4114,9 +4155,6 @@ class AIAssistantGUI(QMainWindow):
 
         if 'whisper_model' in settings:
             self.whisper_model = settings['whisper_model']
-            # === Profiles saved before the rename store "large" — map it to the current folder name ===
-            if self.whisper_model == "large":
-                self.whisper_model = "large-v3"
             model_map = {"tiny": 0, "base": 1, "small": 2, "medium": 3, "large-v3": 4}
             if self.whisper_model in model_map:
                 self.whisper_model_group.button(model_map[self.whisper_model]).setChecked(True)
@@ -4247,7 +4285,7 @@ class AIAssistantGUI(QMainWindow):
         dialog.move(x, y)
 
         # === Version ===
-        version_label = QLabel("Version: 0.1.10 Beta", dialog)
+        version_label = QLabel("Version: 0.1.11 Beta", dialog)
         version_label.setGeometry(140, 2, 200, 20)
         version_label.setStyleSheet("color: #FFFF96; font-weight: bold; font-size: 10pt;")
 
@@ -4384,7 +4422,7 @@ class AIAssistantGUI(QMainWindow):
         for path in common_paths:
             if os.path.exists(path):
                 subprocess.Popen([path])
-                logging.info(f"[LM Studio] Launched from: {path}")
+                logging.info(f"✅ LM Studio Launched From: {path}")
                 return
 
         # === Not found ===
@@ -4412,7 +4450,7 @@ class AIAssistantGUI(QMainWindow):
                 [sys.executable, MCP_SERVER_FILE],
                 cwd=MCP_SERVER_DIR
             )
-            logging.info("MCP GUI launched")
+            logging.info("✅ MCP GUI Launched")
         except Exception as e:
             logging.error(f"MCP Failed to open GUI: {e}")
 
@@ -4440,7 +4478,7 @@ class AIAssistantGUI(QMainWindow):
         self.tts.release_gpu_memory()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-            logging.info("🗑️ GPU memory cleared")
+            logging.info("🗑️ GPU Memory Cleared")
 
     def _build_settings_dict(self):
         """
@@ -4544,7 +4582,7 @@ class AIAssistantGUI(QMainWindow):
                 if os.path.exists(new_chat_log):
                     os.remove(new_chat_log)
                 os.rename(self.current_chat_log, new_chat_log)
-                logging.info(f"✅ Chat History moved → {new_chat_log}")
+                logging.info(f"✅ Chat History Moved → {new_chat_log}")
 
             # === Release all RAG file handles before touching the directory on disk ===
             self.rag.release_for_move()
@@ -4555,7 +4593,7 @@ class AIAssistantGUI(QMainWindow):
             if os.path.exists(old_rag_dir):
                 try:
                     shutil.rmtree(old_rag_dir)
-                    logging.info(f"✅ Old RAG DB deleted: {old_rag_dir}")
+                    logging.info(f"🗑️ Old RAG DB Deleted: {old_rag_dir}")
                 except Exception as e:
                     logging.warning(f"⚠️ Could not delete old RAG DB: {e} — will be overwritten on next use")
 
@@ -4568,11 +4606,11 @@ class AIAssistantGUI(QMainWindow):
 
             # === Rebuild RAG from Chat History ===
             if self.rag_memory_enabled:
-                logging.info("🔄 Rebuilding RAG from Chat History for new profile...")
+                logging.info("♻️ Rebuilding RAG From Chat History For New Profile...")
                 self.rag.rebuild()
 
         except Exception as e:
-            logging.error(f"❌ Error saving conversation to profile: {str(e)}")
+            logging.error(f"❌ Error Saving Conversation To Profile: {str(e)}")
             QMessageBox.critical(self, "Error", f"Error saving conversation:\n{str(e)}")
 
     def load_settings(self):
@@ -4705,7 +4743,7 @@ class AIAssistantGUI(QMainWindow):
         # === Reset profile paths to default "Jarvis" ===
         self.switch_profile_paths("Jarvis")
         self.profile_modified = False
-        logging.info("✅ Profile Paths Reset To Default 'Jarvis'.")
+        logging.info("♻️ Profile Paths Reset To Default 'Jarvis'.")
 
         logging.info("✅ Default Settings Loaded.")
         if not silent:
@@ -4730,7 +4768,7 @@ class AIAssistantGUI(QMainWindow):
         if file_path:
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(self.prompt_text.toPlainText())
-            logging.info(f"Prompt saved to {file_path}")
+            logging.info(f"✅ Prompt Saved To {file_path}")
             QMessageBox.information(self, "Success", "Prompt saved successfully")
 
     def load_prompt(self):
@@ -4738,7 +4776,7 @@ class AIAssistantGUI(QMainWindow):
         if file_path:
             with open(file_path, "r", encoding="utf-8") as f:
                 self.prompt_text.setPlainText(f.read())
-            logging.info(f"Prompt loaded from {file_path}")
+            logging.info(f"✅ Prompt Loaded From {file_path}")
             QMessageBox.information(self, "Success", "Prompt Loaded Successfully")
 
     def save_chat_history(self):
@@ -4747,7 +4785,7 @@ class AIAssistantGUI(QMainWindow):
             with open(file_path, "w", encoding="utf-8") as f:
                 for entry in self.chat_history:
                     f.write(f"{entry['timestamp']} {entry['role']}: {entry['text']}\n")
-            logging.info(f"Chat history saved to {file_path}")
+            logging.info(f"✅ Chat History Saved To {file_path}")
             QMessageBox.information(self, "Success", "Chat history saved successfully")
 
     def load_chat_history(self):
@@ -4787,14 +4825,14 @@ class AIAssistantGUI(QMainWindow):
             try:
                 with open(self.current_chat_log, "w", encoding="utf-8") as f:
                     pass
-                logging.info("✅ Chat Log File Cleared.")
+                logging.info("🗑️ Chat Log File Cleared.")
             except Exception as e:
                 logging.error(f"❌ Error clearing chat log file: {str(e)}")
 
             # === 3. Full RAG reset — encapsulated in RAGManager.clear() ===
             self.rag.clear()
 
-            logging.info("✅ Chat History And RAG Database Fully Reset.")
+            logging.info("♻️ Chat History And RAG Database Fully Reset.")
             QMessageBox.information(
                 self, 
                 "Success", 
@@ -4870,7 +4908,7 @@ class AIAssistantGUI(QMainWindow):
     
         # === REBUILD PROCESS ===
         try:
-            logging.info("🔄 Starting RAG database rebuild...")
+            logging.info("♻️ Starting RAG Database Rebuild...")
 
             # === Rebuild from User/Assistant history only (this also purges any old MCP entries from the RAG database) ===
             messages_indexed = self.rag.rebuild(self.chat_history)
@@ -4911,7 +4949,7 @@ class AIAssistantGUI(QMainWindow):
                 f"Memory is now up to date!"
             )
         
-            logging.info(f"✅ RAG rebuild complete: {actual_count} documents")
+            logging.info(f"✅ RAG Rebuild Complete: {actual_count} Documents")
         
         except Exception as e:
             logging.error(f"Error checking rebuild status: {str(e)}")
@@ -4920,7 +4958,7 @@ class AIAssistantGUI(QMainWindow):
         """Displays the whole chat history in the UI (chronological order)"""
         self.chat_text.clear()
 
-        logging.info(f"✅ Chat Display Refreshed: {len(self.chat_history)} Messages")
+        logging.info(f"♻️ Chat Display Refreshed: {len(self.chat_history)} Messages")
 
         # === Chronological sorting before display ===
         sorted_history = sorted(self.chat_history, key=lambda x: x.get('timestamp', ''))
@@ -4950,7 +4988,7 @@ class AIAssistantGUI(QMainWindow):
         # === Stop the headless MCP Server if it runs ===
         if self.use_mcp_server:
             self.llm.stop_mcp_server_headless()
-            logging.info("MCP Server stopped on application close")
+            logging.info("✅ MCP Server Stopped On Application Close")
         super().closeEvent(event)
 
 if __name__ == "__main__":
