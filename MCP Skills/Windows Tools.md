@@ -65,7 +65,7 @@ IF the user asked about a file's SIZE, DATE, or wants its TEXT CONTENT:
 
 --- GENERAL RULE FOR ALL "OPENING SOMETHING" RESPONSES ---
 
-The phrase "in your browser" belongs ONLY to the YOUTUBE workflow (Google Services skill) -
+The phrase "in your browser" belongs ONLY to the YOUTUBE workflow ("web_search" skill) -
 it is specific to youtube_play, which really does open a web browser.
 Every other launcher (open_app, open_system_tool, open_folder, windows_media_play)
 opens something as its own window or in its own default app - NEVER a browser.
