@@ -90,11 +90,54 @@ def create_folder_structure():
 # === Create all folders at startup ===
 _created = create_folder_structure()
 
-# ====== LOGGING CONFIG ======
-MCP_SERVER_DIR  = os.path.join(BASE_DIR, "MCP Server")
-MCP_SERVER_FILE = os.path.join(MCP_SERVER_DIR, "MCP Server.py")
-LOG_DIR = os.path.join(BASE_DIR, "Debug Logs")
+# ====== GLOBAL CONFIG ======
+MCP_SERVER_DIR     = os.path.join(BASE_DIR, "MCP Server")
+MCP_SERVER_FILE    = os.path.join(MCP_SERVER_DIR, "MCP Server.py")
+LOG_DIR            = os.path.join(BASE_DIR, "Debug Logs")
+PROMPTS_DIR        = os.path.join(BASE_DIR, "System Prompt")
+HISTORY_DIR        = os.path.join(BASE_DIR, "Chat History")
+CHAT_LOG           = os.path.join(HISTORY_DIR, "Jarvis.txt") # === Jarvis is the Default Profile with hardcoded settings ===
+SETTINGS_DIR       = os.path.join(BASE_DIR, "Profiles")
+COQUI_MODELS_DIR   = os.path.join(BASE_DIR, "Coqui TTS", "Models")
+COQUI_SAMPLES_DIR  = os.path.join(BASE_DIR, "Coqui TTS", "Samples")
+WHISPER_MODELS_DIR = os.path.join(BASE_DIR, "Whisper STT", "Models")
+GRAPHICS_DIR       = os.path.join(BASE_DIR, "Graphics")
+RAG_EMBEDDER_DIR   = os.path.join(BASE_DIR, "RAG Embedder", "MiniLM-L6-v2")
+RAG_DATABASE_DIR   = os.path.join(BASE_DIR, "RAG Vector Database")
 
+# ====== VAD CONFIG ======
+CHUNK                    = 512
+FORMAT                   = pyaudio.paInt16
+CHANNELS                 = 1
+RATE                     = 16000
+VAD_THRESHOLD            = 0.2
+VAD_WINDOW_SIZE          = 512
+VAD_MIN_SPEECH_DURATION  = 1.0
+VAD_MIN_SILENCE_DURATION = 1.5
+
+# ====== TTS PLAYBACK CONFIG ======
+TTS_STALL_TIMEOUT_SEC    = 10     # === Playback is aborted only if NO audio chunk was written for this long (no total time limit) ===
+TTS_WAIT_POLL_SEC        = 0.25   # === Polling interval while waiting for playback / completion ===
+TTS_MIC_RESUME_DELAY_SEC = 0.18   # === Safety margin after playback ends, before the microphone is resumed (Standard Mode) ===
+
+# ====== LLM CONTEXT CONFIG (recent conversation + RAG memory injected on every LLM query) ======
+RECENT_CONTEXT_PAIRS  = 32     # === Recent User->Assistant pairs injected into the system prompt (32 pairs = 64 messages) ===
+RECENT_MSG_MAX_CHARS  = 1000   # === Max characters kept per recent message (User or Assistant) ===
+RAG_TOP_K             = 4      # === RAG message budget: RAG_TOP_K // 2 semantic pairs are injected ===
+RAG_DOC_MAX_CHARS     = 1000   # === Max characters kept per RAG message ===
+RAG_CONTEXT_MAX_CHARS = 4500   # === Hard cap for the whole RAG block (2 pairs x 2 messages x ~1000 chars + labels) ===
+CONTEXT_STRIP_RE      = re.compile(r"[^\w\s,.!?\-'\":/\\(){}\[\]]", re.UNICODE)    # === Characters kept when cleaning messages for the LLM context — everything else (emoji, symbols) is stripped ===
+
+
+def count_context_messages(context):
+    """Count the real pairs/messages in a context string made of 'User: ...' / 'Assistant: ...' lines."""
+    if not context:
+        return 0, 0
+    lines = [line for line in context.split("\n") if line.strip()]
+    pairs = sum(1 for line in lines if line.startswith("User: "))
+    return pairs, len(lines)
+
+# ====== LOGGING CONFIG (needs LOG_DIR above; must run before the first logging call) ======
 class Utf8StreamHandler(logging.StreamHandler):
     def __init__(self, stream=None):
         super().__init__(stream)
@@ -113,49 +156,6 @@ logging.basicConfig(
 # === Third-party libraries log through the same root logger — quiet the chatty ones ===
 for noisy_logger in ("sentence_transformers", "chromadb", "urllib3"):
     logging.getLogger(noisy_logger).setLevel(logging.WARNING)
-
-# ====== GLOBAL CONFIG ======
-PROMPTS_DIR        = os.path.join(BASE_DIR, "System Prompt")
-HISTORY_DIR        = os.path.join(BASE_DIR, "Chat History")
-CHAT_LOG           = os.path.join(HISTORY_DIR, "Jarvis.txt") # === Jarvis is the Default Profile with hardcoded settings ===
-SETTINGS_DIR       = os.path.join(BASE_DIR, "Profiles")
-COQUI_MODELS_DIR   = os.path.join(BASE_DIR, "Coqui TTS", "Models")
-COQUI_SAMPLES_DIR  = os.path.join(BASE_DIR, "Coqui TTS", "Samples")
-WHISPER_MODELS_DIR = os.path.join(BASE_DIR, "Whisper STT", "Models")
-GRAPHICS_DIR       = os.path.join(BASE_DIR, "Graphics")
-RAG_EMBEDDER_DIR   = os.path.join(BASE_DIR, "RAG Embedder", "MiniLM-L6-v2")
-RAG_DATABASE_DIR   = os.path.join(BASE_DIR, "RAG Vector Database")
-# === All folders above are created at startup by "create_folder_structure()" ===
-CHUNK = 512
-FORMAT = pyaudio.paInt16
-CHANNELS = 1
-RATE = 16000
-VAD_THRESHOLD = 0.2
-VAD_WINDOW_SIZE = 512
-VAD_MIN_SPEECH_DURATION = 1.0
-VAD_MIN_SILENCE_DURATION = 1.5
-
-# ====== TTS PLAYBACK CONFIG ======
-TTS_STALL_TIMEOUT_SEC    = 10     # === Playback is aborted only if NO audio chunk was written for this long (no total time limit) ===
-TTS_WAIT_POLL_SEC        = 0.25   # === Polling interval while waiting for playback / completion ===
-TTS_MIC_RESUME_DELAY_SEC = 0.18   # === Safety margin after playback ends, before the microphone is resumed (Standard Mode) ===
-
-# ====== LLM CONTEXT CONFIG (recent conversation + RAG memory injected on every LLM query) ======
-RECENT_CONTEXT_PAIRS  = 32     # === Recent User->Assistant pairs injected into the system prompt (32 pairs = 64 messages) ===
-RECENT_MSG_MAX_CHARS  = 1000   # === Max characters kept per recent message (User or Assistant) ===
-RAG_TOP_K             = 4      # === RAG message budget: RAG_TOP_K // 2 semantic pairs are injected ===
-RAG_DOC_MAX_CHARS     = 1000   # === Max characters kept per RAG message ===
-RAG_CONTEXT_MAX_CHARS = 4500   # === Hard cap for the whole RAG block (2 pairs x 2 messages x ~1000 chars + labels) ===
-# === Characters kept when cleaning messages for the LLM context — everything else (emoji, symbols) is stripped ===
-CONTEXT_STRIP_RE      = re.compile(r"[^\w\s,.!?\-'\":/\\(){}\[\]]", re.UNICODE)
-
-def count_context_messages(context):
-    """Count the real pairs/messages in a context string made of 'User: ...' / 'Assistant: ...' lines."""
-    if not context:
-        return 0, 0
-    lines = [line for line in context.split("\n") if line.strip()]
-    pairs = sum(1 for line in lines if line.startswith("User: "))
-    return pairs, len(lines)
 
 ModelManager.models_dir = COQUI_MODELS_DIR
 logging.info(f"✅ Folder Structure Initialized — {_created} New Folder(s) Created")
