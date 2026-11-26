@@ -14,7 +14,7 @@ Key Features :
 - 🔊 TTS - Coqui XTTS-V2 for natural, cloneable voice synthesis ```On Par With Eleven Labs on Voice Quality```
 - 💬 Chat History - Persistent conversation log with full context management ```Each profile has it's own chat history and RAG database and at every query context is constructed automatically (last 2 message pairs User/Assistant from chat history and 2 semantically matched pairs from RAG) ```
 - 🧠 RAG Database - MiniLM-L6-v2 + ChromaDB for Semantic very-long-term memory and document retrieval: ```.pdf .txt``` ```There is NO limit on how much it can remember😊```
-- 🔌 MCP Server - Modular plugin system for extending the assistant's capabilities ```Supports: Google Services, Windows CLI, Home Assistant, Telegram, Signal and more to come```
+- 🔌 MCP Server - Modular plugin system for extending the assistant's capabilities ```Supports: Web Search (With Tavily API), Windows CLI, Home Assistant, Telegram, Signal and more to come```
 - 🐍 Architecture - Full Python ```with two C++ backends: faster-whisper and ChromaDB```
 - 🖥️ GUI - PyQt5 for a clean and modern desktop interface ```Control Pannel Style```
 
